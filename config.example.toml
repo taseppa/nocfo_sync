@@ -1,0 +1,19 @@
+# Copy to config.toml and fill in.  config.toml is git-ignored.
+
+[nocfo]
+# Production: https://api.nocfo.io   Test: https://api-tst.nocfo.io
+base_url = "https://api-tst.nocfo.io"
+token = "your-personal-access-token"
+business_slug = "your-business-slug"
+# Send Idempotency-Key on uploads (see README: api-tst rejects it with 500).
+idempotency = true
+
+[gdrive]
+# Google Drive for Desktop mount point.
+mount = "~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive"
+# Folder to sync, relative to the mount.  Leave empty and run
+# `nocfo-sync pick-drive-root` (or just `nocfo-sync sync`) to choose it.
+root_folder = ""
+# NoCFO destination folder id.  Omit the line entirely to use the NoCFO root,
+# or run `nocfo-sync pick-destination` to choose one.
+# destination_folder_id = 1234
