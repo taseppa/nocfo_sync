@@ -62,6 +62,22 @@ The token may also live in a plain `config` file (`token=…`) or in the
 `NOCFO_TOKEN` environment variable. `config.toml` and `config` are
 git-ignored.
 
+### Where the config is found
+
+`nocfo-sync` is **not** tied to the directory you run it from. It looks for
+`config.toml` in this order and uses the first one it finds:
+
+1. the path passed with `--config`
+2. the `NOCFO_SYNC_CONFIG` environment variable
+3. the current working directory
+4. `~/.config/nocfo-sync/config.toml`
+5. the repository root (so `.venv/bin/nocfo-sync` works from anywhere)
+
+A plain `config` file in the same locations is merged in as a fallback. The
+sync database (`.state/sync.db`) is stored **next to the config file**, so
+runs from different directories share the same state. `nocfo-sync status`
+prints exactly which config and state file are in use.
+
 ## Use
 
 ```sh
@@ -87,12 +103,21 @@ NoCFO or the state DB.
 ### Pickers
 
 Both pickers lazily load children as you expand, so deep trees stay fast.
+The keys are the same in both:
 
-- **Drive picker** — browses the local mount, directories only. Optional
-  fuzzy-free type-to-filter is not implemented; navigate the tree instead.
-- **NoCFO picker** — browses the NoCFO folder tree. `n` creates a folder
-  under the cursor, Enter selects (select the `NoCFO root` node to sync into
-  the root), Esc/q cancels.
+| Key | Action |
+|---|---|
+| `↑` / `↓` | move the cursor |
+| `→` | open the folder (press again to step into the first child) |
+| `←` | close the folder, or jump to its parent |
+| `space` | toggle open/closed |
+| `enter` | **choose** the folder under the cursor |
+| `esc` / `q` | cancel |
+
+- **Drive picker** — browses the local mount, directories only. Choosing the
+  top `My Drive` node syncs the whole mount.
+- **NoCFO picker** — browses the NoCFO folder tree; `n` creates a new folder
+  under the cursor. Choose the `NoCFO root` node to sync into the root.
 
 ## Scheduling
 

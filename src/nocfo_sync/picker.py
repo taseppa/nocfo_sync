@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Callable
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, Label, ProgressBar, Static, Tree
@@ -28,6 +30,58 @@ def _is_placeholder(node: TreeNode) -> bool:
     )
 
 
+class FolderTree(Tree):
+    """A Tree with predictable folder-picker keys.
+
+    Textual's stock ``Tree`` binds ``enter`` to expand/collapse and does not
+    bind the left/right arrows at all, which makes it impossible to both
+    navigate *into* folders and *choose* one.  Here:
+
+    - up/down   move the cursor
+    - right     open the folder (and step into its first child)
+    - left      close the folder (or jump to the parent)
+    - space     toggle open/closed
+    - enter     choose the folder under the cursor
+
+    The ``enter`` binding lives on the tree (not the app) so it can't shadow
+    the new-folder input screen's own ``enter``.
+    """
+
+    BINDINGS = [
+        Binding("up", "cursor_up", "Up", show=False),
+        Binding("down", "cursor_down", "Down", show=False),
+        Binding("right", "open_folder", "Open", show=True),
+        Binding("left", "close_folder", "Close", show=True),
+        Binding("space", "toggle_node", "Toggle", show=False),
+        Binding("enter", "choose", "Select", show=True),
+    ]
+
+    on_choose: Callable[[], None] | None = None
+
+    def action_open_folder(self) -> None:
+        node = self.cursor_node
+        if node is None:
+            return
+        if node.allow_expand and not node.is_expanded:
+            node.expand()
+        elif node.children and not _is_placeholder(node):
+            # already open — step into the first child
+            self.move_cursor(node.children[0])
+
+    def action_close_folder(self) -> None:
+        node = self.cursor_node
+        if node is None:
+            return
+        if node.is_expanded and node.children:
+            node.collapse()
+        elif node.parent is not None:
+            self.move_cursor(node.parent)
+
+    def action_choose(self) -> None:
+        if self.on_choose is not None:
+            self.on_choose()
+
+
 # --------------------------------------------------------------------------
 # Drive folder picker (local filesystem)
 # --------------------------------------------------------------------------
@@ -42,7 +96,6 @@ class DriveFolderPicker(App[Path | None]):
     """
 
     BINDINGS = [
-        ("enter", "select", "Sync from here"),
         ("q,escape", "cancel", "Cancel"),
     ]
 
@@ -55,11 +108,14 @@ class DriveFolderPicker(App[Path | None]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         yield Static(f"Select a Google Drive folder  [dim]({self.mount_path})[/dim]")
-        tree: Tree[Path] = Tree("My Drive", data=self.mount_path)
+        tree: FolderTree[Path] = FolderTree("My Drive", data=self.mount_path)
+        tree.on_choose = self.action_select
         tree.root.expand()
         self._populate(tree.root)
         yield tree
-        yield Label("enter = select   q/esc = cancel", id="hint")
+        yield Label(
+            "→ open   ← close   enter = sync from here   q/esc = cancel", id="hint"
+        )
         yield Footer()
 
     def _populate(self, node: TreeNode[Path]) -> None:
@@ -92,8 +148,8 @@ class DriveFolderPicker(App[Path | None]):
             self._populate(node)
 
     @property
-    def tree(self) -> Tree[Path]:
-        return self.query_one(Tree)
+    def tree(self) -> FolderTree[Path]:
+        return self.query_one(FolderTree)
 
     def on_mount(self) -> None:
         if self.preselect and self.preselect.is_dir():
@@ -162,7 +218,6 @@ class NoCfoFolderPicker(App[int | None]):
     """
 
     BINDINGS = [
-        ("enter", "select", "Sync into here"),
         ("n", "new_folder", "New folder"),
         ("q,escape", "cancel", "Cancel"),
     ]
@@ -178,18 +233,20 @@ class NoCfoFolderPicker(App[int | None]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         yield Static("Select the NoCFO destination folder")
-        tree: Tree[int | None] = Tree("NoCFO root", data=None)
+        tree: FolderTree[int | None] = FolderTree("NoCFO root", data=None)
+        tree.on_choose = self.action_select
         tree.root.expand()
         self._populate_root(tree.root)
         yield tree
         yield Label(
-            "enter = select   n = new folder here   q/esc = cancel", id="hint"
+            "→ open   ← close   enter = sync into here   n = new folder   q/esc = cancel",
+            id="hint",
         )
         yield Footer()
 
     @property
-    def tree(self) -> Tree[int | None]:
-        return self.query_one(Tree)
+    def tree(self) -> FolderTree[int | None]:
+        return self.query_one(FolderTree)
 
     def _populate_root(self, node: TreeNode[int | None]) -> None:
         node.remove_children()

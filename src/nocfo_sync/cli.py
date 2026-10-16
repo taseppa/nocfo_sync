@@ -20,8 +20,6 @@ from .picker import DriveFolderPicker, NoCfoFolderPicker, SyncProgressApp
 from .state import State
 from .sync import SyncEngine
 
-STATE_PATH = Path(".state/sync.db")
-
 
 def _client(cfg: Config) -> NoCfoClient:
     if not cfg.token:
@@ -66,7 +64,7 @@ def cmd_sync(cfg: Config, args: argparse.Namespace) -> int:
     root = cfg.root_path
     assert root is not None
 
-    state = State(STATE_PATH)
+    state = State(cfg.state_path)
     engine = SyncEngine(
         client, state, root, cfg.destination_folder_id, dry_run=args.dry_run
     )
@@ -147,11 +145,12 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
     print(f"drive mount:   {cfg.mount}  {'(exists)' if cfg.mount.is_dir() else '(MISSING)'}")
     print(f"drive root:    {cfg.root_folder or '(not selected)'}")
     print(f"destination:   {cfg.destination_folder_id or 'NoCFO root'}")
-    if STATE_PATH.exists():
-        state = State(STATE_PATH)
+    state_path = cfg.state_path
+    if state_path.exists():
+        state = State(state_path)
         n_files = len(state.all_file_relpaths())
-        n_folders = state.db.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
-        print(f"state:         {n_files} files, {n_folders} folders tracked ({STATE_PATH})")
+        n_folders = state.count_folders()
+        print(f"state:         {n_files} files, {n_folders} folders tracked ({state_path})")
         state.close()
     else:
         print("state:         (no sync has run yet)")

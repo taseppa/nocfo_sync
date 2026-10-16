@@ -92,6 +92,10 @@ class State:
         with self._lock:
             return {r[0] for r in self.db.execute("SELECT drive_relpath FROM files")}
 
+    def count_folders(self) -> int:
+        with self._lock:
+            return self.db.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
+
     def remove_file(self, relpath: str) -> None:
         with self._lock:
             self.db.execute("DELETE FROM files WHERE drive_relpath = ?", (relpath,))

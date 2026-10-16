@@ -45,6 +45,13 @@ class Config:
             raise ConfigError(f"root_folder escapes the mount: {self.root_folder}")
         return p
 
+    @property
+    def state_path(self) -> Path:
+        """Where the sync database lives: next to the config file, so the
+        tool works no matter which directory it is run from."""
+        base = self.path.parent if self.path else Path.cwd()
+        return base / ".state" / "sync.db"
+
 
 def _parse_kv_file(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
@@ -57,13 +64,62 @@ def _parse_kv_file(path: Path) -> dict[str, str]:
     return out
 
 
+def _search_dirs() -> list[Path]:
+    """Directories searched for ``config.toml`` / ``config``, in order.
+
+    The repo root is included so the checked-out project's config is found no
+    matter which directory the command is run from.
+    """
+    dirs = [Path.cwd(), Path.home() / ".config" / "nocfo-sync"]
+    # src/nocfo_sync/config.py -> [0] nocfo_sync, [1] src, [2] repo root
+    repo_root = Path(__file__).resolve().parents[2]
+    dirs.append(repo_root)
+    # de-duplicate, keep order
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for d in dirs:
+        if d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def find_config(explicit: str | Path | None = None) -> Path | None:
+    """Return the config.toml to use, or None if none exists."""
+    if explicit is not None:
+        path = Path(explicit).expanduser()
+        if not path.exists():
+            raise ConfigError(f"config file not found: {path}")
+        return path
+    env = os.environ.get("NOCFO_SYNC_CONFIG")
+    if env:
+        path = Path(env).expanduser()
+        if not path.exists():
+            raise ConfigError(f"NOCFO_SYNC_CONFIG points at a missing file: {path}")
+        return path
+    for d in _search_dirs():
+        candidate = d / "config.toml"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _legacy_config() -> Path | None:
+    for d in _search_dirs():
+        candidate = d / "config"
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def load_config(explicit: str | Path | None = None) -> Config:
-    """Load config.toml (plus legacy ``config`` fallback) from the cwd."""
-    cwd = Path.cwd()
+    """Load ``config.toml``, searching the cwd, ``~/.config/nocfo-sync`` and
+    the repo root.  A legacy plain ``config`` file (``token=…``) is merged in
+    as a fallback."""
     cfg = Config()
 
-    legacy_path = cwd / "config"
-    if explicit is None and legacy_path.exists():
+    legacy_path = _legacy_config()
+    if legacy_path is not None:
         kv = _parse_kv_file(legacy_path)
         if "token" in kv:
             cfg.token = kv["token"]
@@ -72,8 +128,8 @@ def load_config(explicit: str | Path | None = None) -> Config:
         if "business_slug" in kv:
             cfg.business_slug = kv["business_slug"]
 
-    path = Path(explicit) if explicit else cwd / "config.toml"
-    if path.exists():
+    path = find_config(explicit)
+    if path is not None:
         data = tomllib.loads(path.read_text())
         nocfo = data.get("nocfo", {})
         gdrive = data.get("gdrive", {})
@@ -89,8 +145,8 @@ def load_config(explicit: str | Path | None = None) -> Config:
         dest = gdrive.get("destination_folder_id")
         cfg.destination_folder_id = int(dest) if dest else None
         cfg.path = path
-    elif explicit is not None:
-        raise ConfigError(f"config file not found: {path}")
+    else:
+        cfg.mount = cfg.mount.expanduser()
 
     # env override for the token (handy for CI / testing)
     if os.environ.get("NOCFO_TOKEN"):
@@ -120,6 +176,7 @@ def save_config(cfg: Config) -> Path:
         f'root_folder = "{cfg.root_folder}"\n'
         f"{dest_line}"
     )
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     cfg.path = path
     return path
