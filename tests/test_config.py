@@ -117,6 +117,22 @@ def test_parses_mappings(isolated_dirs):
     assert second.destination_chosen is False
 
 
+def test_parses_destination_folder_name(isolated_dirs):
+    work, _ = isolated_dirs
+    (work / "config.toml").write_text(
+        "[[mapping]]\n"
+        'business_slug = "acme"\n'
+        'root_folder = "Receipts"\n'
+        "destination_folder_id = 42\n"
+        'destination_folder_name = "Receipts 2026"\n'
+        "destination_selected = true\n"
+    )
+    m = load_config().mappings[0]
+    assert m.destination_folder_id == 42
+    assert m.destination_folder_name == "Receipts 2026"
+    assert m.destination_label == "Receipts 2026"
+
+
 def test_root_destination_flag_makes_it_chosen(isolated_dirs):
     work, _ = isolated_dirs
     (work / "config.toml").write_text(

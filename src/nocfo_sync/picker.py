@@ -265,10 +265,12 @@ class NocfoChoice:
 
     ``folder_id`` is None both for "the NoCFO root" and for a cancel, so
     ``cancelled`` carries the distinction (selecting the root is a real
-    choice, not a cancel).
+    choice, not a cancel).  ``folder_name`` is the human label we can show in
+    the UI without another API call; it is None for the root.
     """
 
     folder_id: int | None = None
+    folder_name: str | None = None
     cancelled: bool = False
 
 
@@ -301,6 +303,9 @@ class NoCfoPickerScreen(Screen[NocfoChoice]):
         self.preselect = preselect
         self.choose = choose
         self._new_folder_parent: TreeNode[int | None] | None = None
+        # folder id -> display name, filled in as the tree is populated so we
+        # can report the chosen folder's name to the caller for free.
+        self._names: dict[int, str] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -334,6 +339,7 @@ class NoCfoPickerScreen(Screen[NocfoChoice]):
             node.allow_expand = False
             return
         for f in folders:
+            self._names[f.id] = f.name
             child = node.add(f"{f.name}  [dim]({f.id})[/dim]", data=f.id)
             _add_placeholder(child)
         node.allow_expand = bool(node.children)
@@ -347,6 +353,7 @@ class NoCfoPickerScreen(Screen[NocfoChoice]):
             node.allow_expand = False
             return
         for c in detail.children or []:
+            self._names[c["id"]] = c["name"]
             child = node.add(f"{c['name']}  [dim]({c['id']})[/dim]", data=c["id"])
             _add_placeholder(child)
         node.allow_expand = bool(node.children)
@@ -374,7 +381,8 @@ class NoCfoPickerScreen(Screen[NocfoChoice]):
         node = self.tree.cursor_node
         if node is None:
             return None
-        return NocfoChoice(folder_id=node.data, cancelled=False)
+        name = None if node.data is None else self._names.get(node.data)
+        return NocfoChoice(folder_id=node.data, folder_name=name, cancelled=False)
 
     def action_select(self) -> None:
         choice = self.current_choice()
@@ -382,7 +390,7 @@ class NoCfoPickerScreen(Screen[NocfoChoice]):
             self.dismiss(choice)
 
     def action_cancel(self) -> None:
-        self.dismiss(NocfoChoice(folder_id=None, cancelled=True))
+        self.dismiss(NocfoChoice(folder_id=None, folder_name=None, cancelled=True))
 
     def action_new_folder(self) -> None:
         if not self.choose:
@@ -421,7 +429,7 @@ class NoCfoTreeScreen(NoCfoPickerScreen):
         return
 
     def action_back(self) -> None:
-        self.dismiss(NocfoChoice(folder_id=None, cancelled=True))
+        self.dismiss(NocfoChoice(folder_id=None, folder_name=None, cancelled=True))
 
 
 class NoCfoFolderPicker(App[int | None]):
@@ -430,6 +438,7 @@ class NoCfoFolderPicker(App[int | None]):
     def __init__(self, client: NoCfoClient, preselect: int | None = None):
         super().__init__()
         self.result: int | None = None
+        self.result_name: str | None = None
         self.cancelled = True
         self._screen = NoCfoPickerScreen(client, preselect)
 
@@ -438,6 +447,7 @@ class NoCfoFolderPicker(App[int | None]):
 
     def _chosen(self, choice: NocfoChoice) -> None:
         self.result = choice.folder_id
+        self.result_name = choice.folder_name
         self.cancelled = choice.cancelled
         self.exit(self.result)
 
@@ -450,13 +460,15 @@ class NoCfoFolderPicker(App[int | None]):
         if choice is None:
             return
         self.result = choice.folder_id
+        self.result_name = choice.folder_name
         self.cancelled = choice.cancelled
         self._screen.dismiss(choice)
 
     def action_cancel(self) -> None:
         self.result = None
+        self.result_name = None
         self.cancelled = True
-        self._screen.dismiss(NocfoChoice(folder_id=None, cancelled=True))
+        self._screen.dismiss(NocfoChoice(folder_id=None, folder_name=None, cancelled=True))
 
 
 class NewFolderScreen(Screen[str | None]):
@@ -485,6 +497,34 @@ class NewFolderScreen(Screen[str | None]):
 # --------------------------------------------------------------------------
 # Sync progress
 # --------------------------------------------------------------------------
+
+
+def _summary_text(s: SyncStats) -> str:
+    """One-line human summary of a sync run (shared by the progress screens)."""
+    text = (
+        f"done: {s.files_uploaded} uploaded, {s.files_updated} updated, "
+        f"{s.files_skipped_unchanged} unchanged, "
+        f"{s.folders_created} folders created, {s.folders_reused} reused, "
+        f"{len(s.errors)} errors"
+    )
+    if s.files_skipped_native:
+        text += f", {s.files_skipped_native} Google-native skipped"
+    if s.files_left_behind:
+        text += f", {s.files_left_behind} left in NoCFO (gone from Drive)"
+    return text
+
+
+def _accumulate(total: SyncStats, part: SyncStats, label: str) -> None:
+    """Fold one run's stats into a running total (errors get a prefix)."""
+    total.folders_created += part.folders_created
+    total.folders_reused += part.folders_reused
+    total.files_uploaded += part.files_uploaded
+    total.files_updated += part.files_updated
+    total.files_skipped_unchanged += part.files_skipped_unchanged
+    total.files_skipped_native += part.files_skipped_native
+    total.files_failed += part.files_failed
+    total.files_left_behind += part.files_left_behind
+    total.errors.extend(f"[{label}] {e}" for e in part.errors)
 
 
 class ProgressScreen(Screen[SyncStats | None]):
@@ -545,18 +585,7 @@ class ProgressScreen(Screen[SyncStats | None]):
         self.stats = stats
         self.finished = True
         self.query_one("#bar", ProgressBar).update(total=100, progress=100)
-        s = stats
-        summary = (
-            f"done: {s.files_uploaded} uploaded, {s.files_updated} updated, "
-            f"{s.files_skipped_unchanged} unchanged, "
-            f"{s.folders_created} folders created, {s.folders_reused} reused, "
-            f"{len(s.errors)} errors"
-        )
-        if s.files_skipped_native:
-            summary += f", {s.files_skipped_native} Google-native skipped"
-        if s.files_left_behind:
-            summary += f", {s.files_left_behind} left in NoCFO (gone from Drive)"
-        self.query_one("#summary", Static).update(summary)
+        self.query_one("#summary", Static).update(_summary_text(stats))
         self.sub_title = "done — press q to go back"
 
     def _crash(self, msg: str) -> None:
@@ -588,3 +617,95 @@ class SyncProgressApp(App[SyncStats | None]):
 
     def on_mount(self) -> None:
         self.push_screen(self._screen, self.exit)
+
+
+class SyncAllProgressScreen(Screen[SyncStats | None]):
+    """Run several mappings' syncs one after another in a single view.
+
+    ``jobs`` is a list of ``(label, SyncEngine)``.  The engines run in a
+    worker thread; each one's progress lines are prefixed with its label and
+    the final stats are the sum of every run.  Dismisses with those totals.
+    """
+
+    CSS = """
+    #log { height: 1fr; border: round $accent; margin: 0 1; padding: 0 1; }
+    #summary { padding: 0 1; color: $success; }
+    #bar { height: 1; margin: 0 1; }
+    """
+
+    BINDINGS = [
+        Binding("q", "back", "Back"),
+        Binding("escape", "back", "Back", show=False),
+    ]
+
+    def __init__(self, jobs: list[tuple[str, SyncEngine]], force: bool = False):
+        super().__init__()
+        self.jobs = jobs
+        self.stats: SyncStats | None = None
+        self.finished = False
+        self.force = force
+        self._log_lines: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        yield ProgressBar(total=max(1, len(self.jobs)), show_eta=False, id="bar")
+        yield Static(id="summary")
+        yield Static(id="log")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.sub_title = (
+            "force sync — re-uploading everything"
+            if self.force
+            else "syncing all mappings…"
+        )
+        self.run_worker(self._run, thread=True)
+
+    def _run(self) -> None:
+        total = SyncStats()
+        for i, (label, engine) in enumerate(self.jobs, start=1):
+            self.app.call_from_thread(self._append_log, f"── {label} ──")
+            engine.progress = (
+                lambda phase, msg, label=label: self.app.call_from_thread(
+                    self._append_log, f"[{label}] {msg}"
+                )
+            )
+            try:
+                part = engine.sync()
+            except Exception as e:  # surface crashes per mapping, keep going
+                self.app.call_from_thread(
+                    self._append_log, f"[{label}] crashed: {e}"
+                )
+                total.errors.append(f"[{label}] {e}")
+                self.app.call_from_thread(self._step, i)
+                continue
+            _accumulate(total, part, label)
+            self.app.call_from_thread(self._step, i)
+        self.app.call_from_thread(self._done, total)
+
+    def _append_log(self, msg: str) -> None:
+        self._log_lines.append(msg)
+        del self._log_lines[:-300]
+        self.query_one("#log", Static).update("\n".join(self._log_lines))
+
+    def _step(self, done: int) -> None:
+        self.query_one("#bar", ProgressBar).update(
+            total=max(1, len(self.jobs)), progress=done
+        )
+
+    def _done(self, stats: SyncStats) -> None:
+        self.stats = stats
+        self.finished = True
+        self.query_one("#bar", ProgressBar).update(
+            total=max(1, len(self.jobs)), progress=len(self.jobs)
+        )
+        self.query_one("#summary", Static).update(_summary_text(stats))
+        self.sub_title = "done — press q to go back"
+
+    def action_back(self) -> None:
+        if not self.finished:
+            self.notify(
+                "sync is still running — wait for it to finish", severity="warning"
+            )
+            return
+        self.dismiss(self.stats)

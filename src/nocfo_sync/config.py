@@ -42,6 +42,9 @@ class Mapping:
     mount: Path = field(default_factory=lambda: Path(DEFAULT_MOUNT).expanduser())
     root_folder: str = ""  # relative path inside the mount; "" = not selected
     destination_folder_id: int | None = None  # None = NoCFO root
+    # The destination's display name, remembered when it is picked so the TUI
+    # can show it without another API call.  Refreshed lazily when missing.
+    destination_folder_name: str | None = None
     # Whether a destination was ever chosen.  Needed because None means both
     # "not chosen yet" and "the NoCFO root" — without this the setup wizard
     # would re-run on every launch after choosing the root.
@@ -68,11 +71,12 @@ class Mapping:
 
     @property
     def destination_label(self) -> str:
+        """Human name for the NoCFO destination (falls back to its id)."""
         if not self.destination_chosen:
             return "(not selected)"
-        return "NoCFO root" if self.destination_folder_id is None else str(
-            self.destination_folder_id
-        )
+        if self.destination_folder_id is None:
+            return "NoCFO root"
+        return self.destination_folder_name or str(self.destination_folder_id)
 
 
 @dataclass
@@ -195,6 +199,8 @@ def _load_mapping(raw: dict) -> Mapping:
     )
     dest = raw.get("destination_folder_id")
     m.destination_folder_id = int(dest) if dest else None
+    name = raw.get("destination_folder_name")
+    m.destination_folder_name = str(name) if name else None
     # older configs predate this flag: an explicit id means it was chosen
     m.destination_chosen = bool(raw.get("destination_selected", dest is not None))
     return m
@@ -231,24 +237,34 @@ def load_config(explicit: str | Path | None = None) -> Config:
     return cfg
 
 
+def _toml_str(value: str) -> str:
+    """A quoted TOML basic string (escapes backslashes and quotes)."""
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def save_config(cfg: Config) -> Path:
     """Persist the config as TOML.  Creates ``config.toml`` next to the
     loaded file (or in the cwd)."""
     path = cfg.path or (Path.cwd() / "config.toml")
     lines = [
         "[nocfo]",
-        f'base_url = "{cfg.base_url}"',
-        f'token = "{cfg.token}"',
+        f"base_url = {_toml_str(cfg.base_url)}",
+        f"token = {_toml_str(cfg.token)}",
         f"idempotency = {'true' if cfg.idempotency else 'false'}",
     ]
     for m in cfg.mappings:
         lines.append("")
         lines.append("[[mapping]]")
-        lines.append(f'business_slug = "{m.business_slug}"')
-        lines.append(f'mount = "{m.mount}"')
-        lines.append(f'root_folder = "{m.root_folder}"')
+        lines.append(f"business_slug = {_toml_str(m.business_slug)}")
+        lines.append(f"mount = {_toml_str(str(m.mount))}")
+        lines.append(f"root_folder = {_toml_str(m.root_folder)}")
         if m.destination_folder_id is not None:
             lines.append(f"destination_folder_id = {m.destination_folder_id}")
+        if m.destination_folder_name:
+            lines.append(
+                f"destination_folder_name = {_toml_str(m.destination_folder_name)}"
+            )
         lines.append(
             f"destination_selected = "
             f"{'true' if m.destination_chosen else 'false'}"

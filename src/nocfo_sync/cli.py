@@ -104,6 +104,7 @@ def _sync_one(cfg: Config, mapping: Mapping, args: argparse.Namespace) -> int:
             client.close()
             return 1
         mapping.destination_folder_id = dest
+        mapping.destination_folder_name = picker.result_name
         mapping.destination_chosen = True
         save_config(cfg)
         label = "NoCFO root" if dest is None else f"folder id {dest}"
@@ -200,6 +201,7 @@ def cmd_pick_destination(cfg: Config, args: argparse.Namespace) -> int:
         print("cancelled.")
         return 1
     mapping.destination_folder_id = picked
+    mapping.destination_folder_name = picker.result_name
     mapping.destination_chosen = True
     path = save_config(cfg)
     label = "NoCFO root" if picked is None else f"folder id {picked}"

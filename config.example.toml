@@ -22,6 +22,10 @@ mount = "~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive"
 root_folder = "Receipts"
 # NoCFO destination folder id.  Omit the line entirely to use the NoCFO root.
 # destination_folder_id = 1234
+# The destination's display name, remembered when it is picked so the TUI can
+# show it without another API call.  Optional; filled in automatically when the
+# TUI views a mapping whose name is missing.
+# destination_folder_name = "Receipts 2026"
 # Whether a destination was chosen at all.  Distinguishes "not chosen yet"
 # (false) from "chose the NoCFO root" (true with no destination_folder_id).
 destination_selected = true
