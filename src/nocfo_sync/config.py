@@ -1,13 +1,20 @@
 """Configuration loading.
 
-Primary config file is ``config.toml`` (git-ignored).  For convenience a
+Primary config file is ``config.toml`` (git-ignored).  It has one shared
+``[nocfo]`` section (base_url / token / idempotency) and one ``[[mapping]]``
+block per Google-Drive-folder → NoCFO-destination mapping.  For convenience a
 legacy plain ``key=value`` file (the original ``config`` file with just
-``token=...``) is also supported and merged in.
+``token=...``) is also supported and merged in for the token/base_url.
+
+Mappings are not named by the user: a mapping is identified by the Drive
+source folder it syncs (``root_folder``), which is what the CLI ``--mapping``
+selector and the TUI labels use.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,15 +28,17 @@ class ConfigError(Exception):
     pass
 
 
-@dataclass
-class Config:
-    # [nocfo]
-    base_url: str = "https://api.nocfo.io"
-    token: str = ""
-    business_slug: str = ""
-    idempotency: bool = True  # send Idempotency-Key on uploads
+def _slug(text: str) -> str:
+    """Filesystem-safe, deterministic key from a mapping's Drive source."""
+    out = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-._").lower()
+    return out or "mapping"
 
-    # [gdrive]
+
+@dataclass
+class Mapping:
+    """One Google Drive folder → NoCFO destination mapping."""
+
+    business_slug: str = ""
     mount: Path = field(default_factory=lambda: Path(DEFAULT_MOUNT).expanduser())
     root_folder: str = ""  # relative path inside the mount; "" = not selected
     destination_folder_id: int | None = None  # None = NoCFO root
@@ -37,8 +46,6 @@ class Config:
     # "not chosen yet" and "the NoCFO root" — without this the setup wizard
     # would re-run on every launch after choosing the root.
     destination_chosen: bool = False
-
-    path: Path | None = None  # file this config was loaded from
 
     @property
     def root_path(self) -> Path | None:
@@ -50,11 +57,75 @@ class Config:
         return p
 
     @property
-    def state_path(self) -> Path:
-        """Where the sync database lives: next to the config file, so the
-        tool works no matter which directory it is run from."""
+    def label(self) -> str:
+        """Human label: the Drive source folder (fallback: the business)."""
+        return self.root_folder or self.business_slug or "(unmapped)"
+
+    @property
+    def state_key(self) -> str:
+        """Stem of this mapping's state DB, derived from its Drive source."""
+        return _slug(self.root_folder or self.business_slug or "mapping")
+
+    @property
+    def destination_label(self) -> str:
+        if not self.destination_chosen:
+            return "(not selected)"
+        return "NoCFO root" if self.destination_folder_id is None else str(
+            self.destination_folder_id
+        )
+
+
+@dataclass
+class Config:
+    # [nocfo] — shared across every mapping
+    base_url: str = "https://api.nocfo.io"
+    token: str = ""
+    idempotency: bool = True  # send Idempotency-Key on uploads
+
+    mappings: list[Mapping] = field(default_factory=list)
+
+    path: Path | None = None  # file this config was loaded from
+
+    @property
+    def state_dir(self) -> Path:
+        """The sync databases live next to the config file, so the tool works
+        no matter which directory it is run from."""
         base = self.path.parent if self.path else Path.cwd()
-        return base / ".state" / "sync.db"
+        return base / ".state"
+
+    def state_path_for(self, mapping: Mapping) -> Path:
+        """One DB per mapping, named after its Drive source folder.
+
+        Two mappings with the same source key would otherwise share a DB and
+        corrupt each other's change tracking, so duplicates get a numeric
+        suffix (deterministic: by position in ``self.mappings``)."""
+        key = mapping.state_key
+        same = [m for m in self.mappings if m.state_key == key]
+        if len(same) > 1:
+            key = f"{key}-{same.index(mapping) + 1}"
+        return self.state_dir / f"{key}.db"
+
+    def find_mapping(self, spec: str) -> Mapping | None:
+        """Resolve a ``--mapping`` selector.
+
+        Matches the Drive source folder exactly, then by basename, then by
+        case-insensitive substring — so ``sync --mapping Receipts`` works and
+        people don't have to type the full relative path.
+        """
+        spec = spec.strip().strip("/")
+        if not spec:
+            return None
+        for m in self.mappings:
+            if m.root_folder == spec:
+                return m
+        for m in self.mappings:
+            if Path(m.root_folder).name == spec:
+                return m
+        low = spec.lower()
+        matches = [m for m in self.mappings if low in m.root_folder.lower()]
+        if len(matches) == 1:
+            return matches[0]
+        return matches[0] if matches else None
 
 
 def _parse_kv_file(path: Path) -> dict[str, str]:
@@ -116,10 +187,23 @@ def _legacy_config() -> Path | None:
     return None
 
 
+def _load_mapping(raw: dict) -> Mapping:
+    m = Mapping(
+        business_slug=str(raw.get("business_slug", "")),
+        mount=Path(str(raw.get("mount", DEFAULT_MOUNT))).expanduser(),
+        root_folder=str(raw.get("root_folder", "")),
+    )
+    dest = raw.get("destination_folder_id")
+    m.destination_folder_id = int(dest) if dest else None
+    # older configs predate this flag: an explicit id means it was chosen
+    m.destination_chosen = bool(raw.get("destination_selected", dest is not None))
+    return m
+
+
 def load_config(explicit: str | Path | None = None) -> Config:
     """Load ``config.toml``, searching the cwd, ``~/.config/nocfo-sync`` and
     the repo root.  A legacy plain ``config`` file (``token=…``) is merged in
-    as a fallback."""
+    as a fallback for the token/base_url."""
     cfg = Config()
 
     legacy_path = _legacy_config()
@@ -129,32 +213,16 @@ def load_config(explicit: str | Path | None = None) -> Config:
             cfg.token = kv["token"]
         if "base_url" in kv:
             cfg.base_url = kv["base_url"]
-        if "business_slug" in kv:
-            cfg.business_slug = kv["business_slug"]
 
     path = find_config(explicit)
     if path is not None:
         data = tomllib.loads(path.read_text())
         nocfo = data.get("nocfo", {})
-        gdrive = data.get("gdrive", {})
         cfg.base_url = nocfo.get("base_url", cfg.base_url).rstrip("/")
         cfg.token = nocfo.get("token", cfg.token)
-        cfg.business_slug = nocfo.get("business_slug", cfg.business_slug)
         cfg.idempotency = bool(nocfo.get("idempotency", cfg.idempotency))
-        if "mount" in gdrive:
-            cfg.mount = Path(gdrive["mount"]).expanduser()
-        else:
-            cfg.mount = cfg.mount.expanduser()
-        cfg.root_folder = gdrive.get("root_folder", cfg.root_folder)
-        dest = gdrive.get("destination_folder_id")
-        cfg.destination_folder_id = int(dest) if dest else None
-        # older configs predate this flag: an explicit id means it was chosen
-        cfg.destination_chosen = bool(
-            gdrive.get("destination_selected", dest is not None)
-        )
+        cfg.mappings = [_load_mapping(raw) for raw in data.get("mapping", [])]
         cfg.path = path
-    else:
-        cfg.mount = cfg.mount.expanduser()
 
     # env override for the token (handy for CI / testing)
     if os.environ.get("NOCFO_TOKEN"):
@@ -167,25 +235,25 @@ def save_config(cfg: Config) -> Path:
     """Persist the config as TOML.  Creates ``config.toml`` next to the
     loaded file (or in the cwd)."""
     path = cfg.path or (Path.cwd() / "config.toml")
-    dest_line = (
-        ""
-        if cfg.destination_folder_id is None
-        else f"destination_folder_id = {cfg.destination_folder_id}\n"
-    )
-    text = (
-        "[nocfo]\n"
-        f'base_url = "{cfg.base_url}"\n'
-        f'token = "{cfg.token}"\n'
-        f'business_slug = "{cfg.business_slug}"\n'
-        f"idempotency = {'true' if cfg.idempotency else 'false'}\n"
-        "\n"
-        "[gdrive]\n"
-        f'mount = "{cfg.mount}"\n'
-        f'root_folder = "{cfg.root_folder}"\n'
-        f"{dest_line}"
-        f"destination_selected = {'true' if cfg.destination_chosen else 'false'}\n"
-    )
+    lines = [
+        "[nocfo]",
+        f'base_url = "{cfg.base_url}"',
+        f'token = "{cfg.token}"',
+        f"idempotency = {'true' if cfg.idempotency else 'false'}",
+    ]
+    for m in cfg.mappings:
+        lines.append("")
+        lines.append("[[mapping]]")
+        lines.append(f'business_slug = "{m.business_slug}"')
+        lines.append(f'mount = "{m.mount}"')
+        lines.append(f'root_folder = "{m.root_folder}"')
+        if m.destination_folder_id is not None:
+            lines.append(f"destination_folder_id = {m.destination_folder_id}")
+        lines.append(
+            f"destination_selected = "
+            f"{'true' if m.destination_chosen else 'false'}"
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
+    path.write_text("\n".join(lines) + "\n")
     cfg.path = path
     return path

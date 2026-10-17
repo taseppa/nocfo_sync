@@ -1,24 +1,27 @@
 # Copy to config.toml and fill in.  config.toml is git-ignored.
 # Easiest path: just run `nocfo-sync` with no arguments — the TUI walks you
-# through the token and both folders and writes this file for you.
+# through the token, then creates one mapping (business + Drive folder +
+# NoCFO destination) and writes this file for you.
 
 [nocfo]
+# Shared by every mapping below.
 # Production (default): https://api.nocfo.io   Test: https://api-tst.nocfo.io
 base_url = "https://api.nocfo.io"
 token = "your-personal-access-token"
-business_slug = "your-business-slug"
 # Send Idempotency-Key on uploads (see README: api-tst rejects it with 500).
 idempotency = true
 
-[gdrive]
+# One [[mapping]] block per Google Drive folder → NoCFO destination sync.
+# Mappings have no name: they are identified by the Drive source folder.
+# The TUI adds these for you; they are shown here for hand-editing.
+[[mapping]]
+business_slug = "your-business-slug"
 # Google Drive for Desktop mount point.
 mount = "~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive"
-# Folder to sync, relative to the mount.  Leave empty and the TUI (or
-# `nocfo-sync pick-drive-root`) will ask you to choose one.
-root_folder = ""
-# NoCFO destination folder id.  Omit the line entirely to use the NoCFO root,
-# or run `nocfo-sync pick-destination` to choose one.
+# Folder to sync, relative to the mount.
+root_folder = "Receipts"
+# NoCFO destination folder id.  Omit the line entirely to use the NoCFO root.
 # destination_folder_id = 1234
 # Whether a destination was chosen at all.  Distinguishes "not chosen yet"
 # (false) from "chose the NoCFO root" (true with no destination_folder_id).
-destination_selected = false
+destination_selected = true
