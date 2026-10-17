@@ -7,6 +7,11 @@ It reads Drive through the **Google Drive for Desktop** mount on macOS — no
 Google Cloud project, no OAuth client, no service account. NoCFO is reached
 with a personal access token.
 
+You can keep **several mappings**: each one is a Drive folder → NoCFO
+destination pair (optionally into a different business). They share the token
+and API base URL, and each keeps its own sync state. Mappings are not named —
+the TUI just shows the Drive folder you picked.
+
 ```
 Google Drive for Desktop mount          NoCFO
 ~/Library/CloudStorage/GoogleDrive-…/   ┌────────────────────────────┐
@@ -49,18 +54,26 @@ cp config.example.toml config.toml
 ```
 
 ```toml
-[nocfo]
+[nocfo]                              # shared by every mapping
 base_url = "https://api.nocfo.io"   # or https://api-tst.nocfo.io
 token = "..."                        # personal access token
-business_slug = "your-business"
 idempotency = true
 
-[gdrive]
+[[mapping]]                          # one block per Drive → NoCFO mapping
+business_slug = "acme"
 mount = "~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive"
-root_folder = ""                     # relative to mount; picked via TUI if empty
+root_folder = "Receipts"             # relative to mount
 destination_folder_id = 1234         # omit for the NoCFO root
+destination_selected = true
+
+[[mapping]]                          # a second mapping, same or other business
+business_slug = "acme"
+mount = "~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive"
+root_folder = "Invoices"
+destination_selected = true
 ```
 
+Each mapping is identified by its `root_folder`, so there is nothing to name.
 The token may also live in a plain `config` file (`token=…`) or in the
 `NOCFO_TOKEN` environment variable. `config.toml` and `config` are
 git-ignored.
@@ -77,9 +90,10 @@ git-ignored.
 5. the repository root (so `.venv/bin/nocfo-sync` works from anywhere)
 
 A plain `config` file in the same locations is merged in as a fallback. The
-sync database (`.state/sync.db`) is stored **next to the config file**, so
-runs from different directories share the same state. `nocfo-sync status`
-prints exactly which config and state file are in use.
+sync database is stored **next to the config file**, one file per mapping
+(`.state/<drive-source>.db`), so runs from different directories share the
+same state. `nocfo-sync status` prints exactly which config and state files
+are in use.
 
 ## Use
 
@@ -91,7 +105,18 @@ Just run it with no arguments — the TUI is the normal way to use the tool:
 
 ### The TUI
 
-One screen does everything: it shows the current setup and offers the actions.
+It opens on your **mappings** — one row per Drive → NoCFO pair. `enter` opens
+the highlighted one, and its menu does the work.
+
+| Key | Action |
+|---|---|
+| `enter` | Open the highlighted mapping |
+| `s` | Sync the highlighted mapping |
+| `a` | Add a mapping |
+| `d` | Remove the highlighted mapping |
+| `q` | Quit |
+
+Inside a mapping:
 
 | Key | Action |
 |---|---|
@@ -100,6 +125,7 @@ One screen does everything: it shows the current setup and offers the actions.
 | `g` | Change the Google Drive source folder |
 | `n` | Change the NoCFO destination folder |
 | `t` | Show the NoCFO folder tree (read-only) |
+| `m` | Back to the mappings list |
 | `i` | Status / details (config path, state path, …) |
 | `q` | Quit |
 
@@ -111,46 +137,53 @@ live log; when it finishes the panel updates with the counts.
 With nothing configured the TUI walks you through setup automatically:
 
 1. **Token** — paste your NoCFO personal access token (checked immediately).
-2. **Business** — if the config has no `business_slug`, pick from the
-   businesses your token can access.
+2. **Business** — pick from the businesses your token can access (auto-chosen
+   if there is only one).
 3. **Drive source** — browse the Drive mount and choose a folder to sync.
 4. **NoCFO destination** — choose where files land (or the NoCFO root).
 
-Each answer is saved to `config.toml` as you go. Cancelling a step drops you
-on the menu with a note about what is still missing; the `g` / `n` keys take
-you back to the picker, so nothing is a dead end. If the Drive mount can't be
-found (Google Drive for Desktop not running) the picker says so instead of
-showing a broken tree.
+That creates your first mapping; each answer is saved to `config.toml` as you
+go. Press `a` on the mappings screen to add more. Cancelling a step drops you
+back without saving anything; the `g` / `n` keys edit the open mapping, so
+nothing is a dead end. If the Drive mount can't be found (Google Drive for
+Desktop not running) the picker says so instead of showing a broken tree.
 
 ### Command line (for cron / scripting)
 
 The subcommands still exist and skip the TUI:
 
 ```sh
-# run one pass (opens the pickers if nothing is configured yet)
+# run one pass over every mapping (creates the first one in the TUI if none)
 .venv/bin/nocfo-sync sync
 
 # non-interactive / scriptable
 .venv/bin/nocfo-sync sync --plain --dry-run --root-destination
+
+# just one mapping, selected by its Drive source folder
+.venv/bin/nocfo-sync sync --mapping Receipts
 
 # re-upload everything, ignoring the unchanged check (repairs files that
 # were uploaded before the type field was sent)
 .venv/bin/nocfo-sync sync --force
 
 # individual pickers, if you prefer them standalone
-.venv/bin/nocfo-sync pick-drive-root
-.venv/bin/nocfo-sync pick-destination
+.venv/bin/nocfo-sync pick-drive-root --mapping Receipts
+.venv/bin/nocfo-sync pick-destination --mapping Receipts
 
 # inspect
 .venv/bin/nocfo-sync status
-.venv/bin/nocfo-sync discover-folders --depth 4
+.venv/bin/nocfo-sync mappings
+.venv/bin/nocfo-sync discover-folders --mapping Receipts --depth 4
 ```
 
-`sync` shows a Textual progress bar and live log. `--plain` prints to stdout
-instead (useful for cron); `--dry-run` computes the plan without touching
-NoCFO or the state DB or reading any file content; `--force` (default **off**)
-re-uploads every file even when its size/mtime fingerprint says it is
-unchanged.
+`sync` with no `--mapping` runs **every** mapping (handy for cron); one
+failing mapping doesn't stop the others. `--mapping` selects a single one by
+its Drive source folder — the relative path, the folder name, or a
+case-insensitive substring. It shows a Textual progress bar and live log;
+`--plain` prints to stdout instead (useful for cron). `--dry-run` computes the
+plan without touching NoCFO or the state DB or reading any file content;
+`--force` (default **off**) re-uploads every file even when its size/mtime
+fingerprint says it is unchanged.
 
 ### Pickers
 
@@ -173,10 +206,11 @@ The keys are the same in both:
 
 ## Scheduling
 
-With the plain output, cron/launchd can run it directly:
+With the plain output, cron/launchd can run it directly (every mapping, one
+command):
 
 ```cron
-0 7 * * *  cd ~/dev/nocfo_sync && .venv/bin/nocfo-sync sync --plain --root-destination >> sync.log 2>&1
+0 7 * * *  cd ~/dev/nocfo_sync && .venv/bin/nocfo-sync sync --plain >> sync.log 2>&1
 ```
 
 ## The undocumented NoCFO folders API
@@ -213,9 +247,11 @@ loudly rather than silently misplacing files.
   any upload carrying that header. On such a 500 the client retries once
   without the header and disables idempotency for the rest of that run
   (a note is printed). Set `idempotency = false` to skip it entirely.
-- **File identity is the relative path.** Renaming/moving a file in Drive
-  looks like a new file plus a vanished one, so NoCFO gets a new copy and the
-  old one is reported as left behind (never deleted).
+- **File identity is the relative path within a mapping.** Renaming/moving a
+  file in Drive looks like a new file plus a vanished one, so NoCFO gets a new
+  copy and the old one is reported as left behind (never deleted). Each
+  mapping tracks its own paths, so two mappings can hold the same-named files
+  without clashing.
 - **Placeholder files**: in streamed mode Drive for Desktop only stores a
   stub until you open a file. The sync reads every file, so a first run over
   a large folder downloads everything locally.
