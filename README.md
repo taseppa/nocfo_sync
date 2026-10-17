@@ -119,8 +119,8 @@ Drive source folder → NoCFO destination pair, shown by name on both sides:
 |---|---|
 | `s` | Sync the highlighted mapping |
 | `S` | Sync **all** mappings, one after another |
-| `f` | Force sync the highlighted mapping — re-upload everything (asks `y`/`n`) |
-| `F` | Force sync all mappings (asks `y`/`n`) |
+| `f` | Force sync the highlighted mapping — re-upload everything, immediately |
+| `F` | Force sync all mappings, immediately |
 | `g` | Change the highlighted mapping's Google Drive source folder |
 | `n` | Change the highlighted mapping's NoCFO destination folder |
 | `t` | Show the NoCFO folder tree for the highlighted mapping (read-only) |

@@ -573,7 +573,7 @@ class NocfoSyncApp(App[None]):
             self._start_sync_all(force=False)
             return
         if action == "force_all":
-            self._confirm_force_all()
+            self._start_sync_all(force=True)
             return
         if action == "info":
             self.push_screen(InfoScreen(self._info_text()))
@@ -585,7 +585,7 @@ class NocfoSyncApp(App[None]):
         if action == "sync":
             self._start_sync(mapping, force=False)
         elif action == "force":
-            self._confirm_force(mapping)
+            self._start_sync(mapping, force=True)
         elif action == "drive":
             self._change_drive(mapping)
         elif action == "dest":
@@ -674,17 +674,6 @@ class NocfoSyncApp(App[None]):
             state.close()
         self._refresh_mappings()
 
-    def _confirm_force(self, mapping: Mapping) -> None:
-        self.push_screen(
-            ConfirmScreen(
-                "Force sync?",
-                f"{mapping.label} — every file is re-uploaded, ignoring the "
-                "unchanged check. Old copies are deleted only when they are not "
-                "attached to a document.",
-            ),
-            lambda ok: self._start_sync(mapping, force=True) if ok else None,
-        )
-
     def _start_sync_all(self, force: bool) -> None:
         jobs: list[tuple[str, SyncEngine]] = []
         resources: list[tuple[NoCfoClient, State]] = []
@@ -728,18 +717,6 @@ class NocfoSyncApp(App[None]):
             finally:
                 state.close()
         self._refresh_mappings()
-
-    def _confirm_force_all(self) -> None:
-        count = len(self.cfg.mappings)
-        self.push_screen(
-            ConfirmScreen(
-                "Force sync all?",
-                f"All {count} mapping(s) are re-uploaded in full, ignoring the "
-                "unchanged check. Old copies are deleted only when they are not "
-                "attached to a document.",
-            ),
-            lambda ok: self._start_sync_all(force=True) if ok else None,
-        )
 
     # -- editing a mapping -----------------------------------------------
 

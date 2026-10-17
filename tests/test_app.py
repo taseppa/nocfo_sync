@@ -474,32 +474,37 @@ async def test_S_syncs_all_mappings(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_f_force_sync_asks_for_confirmation(tmp_path):
+async def test_f_force_sync_runs_immediately(tmp_path):
+    (tmp_path / "kuitit").mkdir()
+    (tmp_path / "kuitit" / "a.txt").write_text("a")
     app = make_app(tmp_path, root_folder="kuitit")
     async with app.run_test() as pilot:
         await _land_on_list(pilot, app)
-        await pilot.press("f")
-        await pilot.pause()
-        assert isinstance(app.screen, ConfirmScreen)
-        await pilot.press("n")
-        await pilot.pause()
-        assert not isinstance(app.screen, ConfirmScreen)
+        await pilot.press("f")  # no confirmation: straight into the sync
+        for _ in range(80):
+            await pilot.pause(0.05)
+            if isinstance(app.screen, ProgressScreen) and app.screen.finished:
+                break
+        assert isinstance(app.screen, ProgressScreen)
+        assert app.screen.force is True
+        assert app.screen.stats.files_uploaded == 1
 
 
 @pytest.mark.asyncio
-async def test_F_force_sync_all_asks_for_confirmation(tmp_path):
+async def test_F_force_sync_all_runs_immediately(tmp_path):
     app = _two_mapping_app(tmp_path)
+    (tmp_path / "kuitit" / "a.txt").write_text("a")
+    (tmp_path / "laskut" / "b.txt").write_text("b")
     async with app.run_test() as pilot:
         await _land_on_list(pilot, app)
-        await pilot.press("F")
-        await pilot.pause()
-        assert isinstance(app.screen, ConfirmScreen)
-        await pilot.press("y")
+        await pilot.press("F")  # no confirmation: straight into the sync
         for _ in range(80):
             await pilot.pause(0.05)
             if isinstance(app.screen, SyncAllProgressScreen) and app.screen.finished:
                 break
         assert isinstance(app.screen, SyncAllProgressScreen)
+        assert app.screen.force is True
+        assert app.screen.stats.files_uploaded == 2
 
 
 # -- config persistence ------------------------------------------------------
