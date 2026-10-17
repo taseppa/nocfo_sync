@@ -1,6 +1,8 @@
-"""Headless tests for the unified TUI (first run, mappings, menu, actions).
+"""Headless tests for the unified TUI.
 
-Everything runs against a fake NoCFO client; no network, no real Drive.
+The whole app is one screen — the mappings list — so these tests cover first
+run, the list's rows, and every shortcut on it.  Everything runs against a
+fake NoCFO client; no network, no real Drive.
 """
 
 from __future__ import annotations
@@ -16,27 +18,32 @@ from nocfo_sync.app import (
     ConfirmScreen,
     InfoScreen,
     MappingsScreen,
-    MenuScreen,
     NocfoSyncApp,
     TokenScreen,
 )
 from nocfo_sync.config import Config, Mapping
 from nocfo_sync.nocfo import NoCfoError, NocfoFolder
-from nocfo_sync.picker import DrivePickerScreen, NoCfoPickerScreen, ProgressScreen
+from nocfo_sync.picker import (
+    DrivePickerScreen,
+    NoCfoPickerScreen,
+    ProgressScreen,
+    SyncAllProgressScreen,
+)
 
 
 class FakeClient:
     """Minimal stand-in covering the calls the app makes."""
 
-    def __init__(self, fail_auth: bool = False, businesses=None):
+    def __init__(self, fail_auth: bool = False, businesses=None, folders=None):
         self.fail_auth = fail_auth
         self.businesses = (
             businesses
             if businesses is not None
             else [{"slug": "biz", "name": "Biz"}]
         )
-        self.notices: list[str] = []
-        self.folders = {1: {"id": 1, "name": "Receipts", "parent": None}}
+        self.folders = folders if folders is not None else {
+            1: {"id": 1, "name": "Receipts", "parent": None}
+        }
         self.files: dict[int, dict] = {}
         self._next_file = 5000
         self.deleted: list[int] = []
@@ -65,6 +72,8 @@ class FakeClient:
         ]
 
     def get_folder(self, folder_id):
+        if folder_id not in self.folders:
+            raise NoCfoError("folder not found", 404)
         f = self.folders[folder_id]
         children = [
             {"id": c["id"], "name": c["name"]}
@@ -107,6 +116,7 @@ def make_mapping(tmp_path: Path, **overrides) -> Mapping:
         mount=overrides.get("mount", tmp_path).resolve(),
         root_folder=overrides.get("root_folder", "kuitit"),
         destination_folder_id=overrides.get("destination_folder_id", None),
+        destination_folder_name=overrides.get("destination_folder_name", None),
         destination_chosen=overrides.get("destination_chosen", True),
     )
 
@@ -127,11 +137,23 @@ def make_app(tmp_path, **overrides) -> NocfoSyncApp:
     return NocfoSyncApp(cfg, client_factory=lambda slug: FakeClient())
 
 
-async def _settle(pilot, screen_type, tries: int = 30) -> None:
+async def _settle(pilot, screen_type, tries: int = 40) -> None:
     for _ in range(tries):
         await pilot.pause(0.05)
         if isinstance(pilot.app.screen, screen_type):
             return
+
+
+async def _land_on_list(pilot, app: NocfoSyncApp) -> MappingsScreen:
+    await _settle(pilot, MappingsScreen)
+    screen = app.screen
+    assert isinstance(screen, MappingsScreen)
+    return screen
+
+
+def _rows(app: NocfoSyncApp) -> list[str]:
+    listing = app.screen.query_one(OptionList)
+    return [str(option.prompt) for option in listing.options]
 
 
 # -- first run ---------------------------------------------------------------
@@ -163,21 +185,18 @@ async def test_first_run_full_wizard_creates_mapping(tmp_path):
     app = NocfoSyncApp(cfg, client_factory=lambda slug: FakeClient())
     async with app.run_test() as pilot:
         await _settle(pilot, DrivePickerScreen)
-        assert isinstance(app.screen, DrivePickerScreen)
         # choose the mount root
         await pilot.press("enter")
         await _settle(pilot, NoCfoPickerScreen)
-        assert isinstance(app.screen, NoCfoPickerScreen)
         # choose "NoCFO root"
         await pilot.press("enter")
-        await _settle(pilot, MenuScreen)
+        await _settle(pilot, MappingsScreen)
         assert len(cfg.mappings) == 1
         m = cfg.mappings[0]
         assert m.root_folder
         assert m.destination_chosen is True
         assert m.destination_folder_id is None
         assert m.business_slug == "biz"  # auto-selected single business
-        assert isinstance(app.screen, MenuScreen)
 
 
 @pytest.mark.asyncio
@@ -196,15 +215,14 @@ async def test_business_picker_when_several_businesses(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_bad_token_with_mappings_lands_on_menu(tmp_path):
-    """A failed probe is non-fatal when there is a mapping: its menu still
+async def test_bad_token_with_mappings_still_shows_list(tmp_path):
+    """A failed probe is non-fatal when there is a mapping: the list still
     opens (offline actions work) with a banner."""
     cfg = make_cfg(tmp_path)  # one mapping
     app = NocfoSyncApp(cfg, client_factory=lambda slug: FakeClient(fail_auth=True))
     async with app.run_test() as pilot:
-        await _settle(pilot, MenuScreen)
-        assert isinstance(app.screen, MenuScreen)
-        assert "unreachable" in app.screen.status_text.lower()
+        screen = await _land_on_list(pilot, app)
+        assert "unreachable" in screen.status_text.lower()
 
 
 @pytest.mark.asyncio
@@ -219,10 +237,10 @@ async def test_bad_token_without_mappings_shows_auth_screen(tmp_path):
         assert isinstance(app.screen, TokenScreen)
 
 
-# -- mappings screen ---------------------------------------------------------
+# -- the mappings list -------------------------------------------------------
 
 
-def _two_mapping_app(tmp_path) -> NocfoSyncApp:
+def _two_mapping_app(tmp_path, **overrides) -> NocfoSyncApp:
     (tmp_path / "kuitit").mkdir(exist_ok=True)
     (tmp_path / "laskut").mkdir(exist_ok=True)
     cfg = make_cfg(
@@ -231,39 +249,73 @@ def _two_mapping_app(tmp_path) -> NocfoSyncApp:
             make_mapping(tmp_path, root_folder="kuitit"),
             make_mapping(tmp_path, root_folder="laskut"),
         ],
+        **overrides,
     )
     return NocfoSyncApp(cfg, client_factory=lambda slug: FakeClient())
 
 
 @pytest.mark.asyncio
-async def test_several_mappings_land_on_list(tmp_path):
+async def test_mappings_list_is_the_home_screen(tmp_path):
     app = _two_mapping_app(tmp_path)
     async with app.run_test() as pilot:
-        await _settle(pilot, MappingsScreen)
-        assert isinstance(app.screen, MappingsScreen)
-        options = app.screen.query_one(OptionList)
-        assert len(options.options) == 2
+        screen = await _land_on_list(pilot, app)
+        assert len(screen.query_one(OptionList).options) == 2
 
 
 @pytest.mark.asyncio
-async def test_enter_opens_mapping_and_m_returns(tmp_path):
-    app = _two_mapping_app(tmp_path)
+async def test_single_mapping_also_lands_on_list(tmp_path):
+    app = make_app(tmp_path, root_folder="kuitit")
     async with app.run_test() as pilot:
-        await _settle(pilot, MappingsScreen)
-        await pilot.press("enter")
-        await _settle(pilot, MenuScreen)
-        assert isinstance(app.screen, MenuScreen)
-        assert app.mapping is app.cfg.mappings[0]
-        await pilot.press("m")
-        await _settle(pilot, MappingsScreen)
-        assert isinstance(app.screen, MappingsScreen)
+        await _land_on_list(pilot, app)
+
+
+@pytest.mark.asyncio
+async def test_rows_show_drive_source_and_destination_name(tmp_path):
+    cfg = make_cfg(
+        tmp_path,
+        mappings=[
+            make_mapping(tmp_path, root_folder="kuitit"),
+            make_mapping(
+                tmp_path,
+                root_folder="laskut",
+                destination_folder_id=1,
+                destination_folder_name="Receipts 2026",
+            ),
+        ],
+    )
+    app = NocfoSyncApp(cfg, client_factory=lambda slug: FakeClient())
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        rows = _rows(app)
+        assert "kuitit" in rows[0] and "NoCFO root" in rows[0]
+        assert "laskut" in rows[1] and "Receipts 2026" in rows[1]
+
+
+@pytest.mark.asyncio
+async def test_missing_destination_name_is_looked_up(tmp_path):
+    """A hand-edited config with only an id gets its name filled in on view."""
+    cfg = make_cfg(
+        tmp_path,
+        mappings=[
+            make_mapping(tmp_path, root_folder="kuitit", destination_folder_id=1)
+        ],
+    )
+    app = NocfoSyncApp(cfg, client_factory=lambda slug: FakeClient())
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        for _ in range(40):
+            await pilot.pause(0.05)
+            if cfg.mappings[0].destination_folder_name:
+                break
+        assert cfg.mappings[0].destination_folder_name == "Receipts"
+        assert "Receipts" in _rows(app)[0]
 
 
 @pytest.mark.asyncio
 async def test_remove_mapping_asks_first(tmp_path):
     app = _two_mapping_app(tmp_path)
     async with app.run_test() as pilot:
-        await _settle(pilot, MappingsScreen)
+        await _land_on_list(pilot, app)
         await pilot.press("d")
         await pilot.pause()
         assert isinstance(app.screen, ConfirmScreen)
@@ -275,7 +327,7 @@ async def test_remove_mapping_asks_first(tmp_path):
         await pilot.press("d")
         await pilot.pause()
         await pilot.press("y")
-        await _settle(pilot, MappingsScreen)
+        await _land_on_list(pilot, app)
         assert len(app.cfg.mappings) == 1
 
 
@@ -283,20 +335,91 @@ async def test_remove_mapping_asks_first(tmp_path):
 async def test_add_mapping_opens_wizard(tmp_path):
     app = _two_mapping_app(tmp_path)
     async with app.run_test() as pilot:
-        await _settle(pilot, MappingsScreen)
+        await _land_on_list(pilot, app)
         await pilot.press("a")
         await _settle(pilot, DrivePickerScreen)
         assert isinstance(app.screen, DrivePickerScreen)
 
 
 @pytest.mark.asyncio
-async def test_sync_from_mappings_screen(tmp_path):
+async def test_add_mapping_full_flow_appends(tmp_path):
+    app = _two_mapping_app(tmp_path)
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        await pilot.press("a")
+        await _settle(pilot, DrivePickerScreen)
+        await pilot.press("enter")  # pick the mount root
+        await _settle(pilot, NoCfoPickerScreen)
+        await pilot.press("enter")  # pick the NoCFO root
+        await _land_on_list(pilot, app)
+        assert len(app.cfg.mappings) == 3
+
+
+# -- per-row shortcuts -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_i_shows_info(tmp_path):
+    app = make_app(tmp_path, root_folder="kuitit")
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        await pilot.press("i")
+        await pilot.pause()
+        assert isinstance(app.screen, InfoScreen)
+
+
+@pytest.mark.asyncio
+async def test_g_opens_drive_picker_for_highlighted(tmp_path):
+    app = _two_mapping_app(tmp_path)
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        await pilot.press("down")  # highlight the second mapping
+        await pilot.press("g")
+        await pilot.pause()
+        assert isinstance(app.screen, DrivePickerScreen)
+
+
+@pytest.mark.asyncio
+async def test_n_opens_nocfo_picker_for_highlighted(tmp_path):
+    app = _two_mapping_app(tmp_path)
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        await pilot.press("n")
+        await pilot.pause()
+        assert isinstance(app.screen, NoCfoPickerScreen)
+
+
+@pytest.mark.asyncio
+async def test_t_opens_readonly_tree(tmp_path):
+    app = make_app(tmp_path, root_folder="kuitit")
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        await pilot.press("t")
+        await pilot.pause()
+        assert isinstance(app.screen, NoCfoPickerScreen)
+        assert app.screen.choose is False
+
+
+@pytest.mark.asyncio
+async def test_q_quits(tmp_path):
+    app = make_app(tmp_path, root_folder="kuitit")
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        await pilot.press("q")
+        await pilot.pause()
+        assert app.return_value is None  # app exited (run_test returned)
+
+
+# -- syncing -----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_s_syncs_the_highlighted_mapping(tmp_path):
     app = _two_mapping_app(tmp_path)  # creates kuitit/ and laskut/
     (tmp_path / "kuitit" / "a.txt").write_text("a")
     (tmp_path / "laskut" / "b.txt").write_text("b")
     async with app.run_test() as pilot:
-        await _settle(pilot, MappingsScreen)
-        # sync the highlighted (first) mapping only
+        await _land_on_list(pilot, app)
         await pilot.press("s")
         for _ in range(80):
             await pilot.pause(0.05)
@@ -308,104 +431,15 @@ async def test_sync_from_mappings_screen(tmp_path):
         assert not (tmp_path / ".state" / "laskut.db").exists()
 
 
-# -- menu --------------------------------------------------------------------
-
-
-def _menu_app(tmp_path, **overrides) -> NocfoSyncApp:
-    (tmp_path / "kuitit").mkdir(exist_ok=True)
-    overrides.setdefault("root_folder", "kuitit")
-    overrides.setdefault("destination_chosen", True)
-    return make_app(tmp_path, **overrides)
-
-
 @pytest.mark.asyncio
-async def test_menu_is_reached_when_configured(tmp_path):
-    app = _menu_app(tmp_path)
-    async with app.run_test() as pilot:
-        await _settle(pilot, MenuScreen)
-        assert isinstance(app.screen, MenuScreen)
-
-
-@pytest.mark.asyncio
-async def test_menu_i_shows_info(tmp_path):
-    app = _menu_app(tmp_path)
-    async with app.run_test() as pilot:
-        await _settle(pilot, MenuScreen)
-        await pilot.press("i")
-        await pilot.pause()
-        assert isinstance(app.screen, InfoScreen)
-
-
-@pytest.mark.asyncio
-async def test_menu_g_opens_drive_picker(tmp_path):
-    app = _menu_app(tmp_path)
-    async with app.run_test() as pilot:
-        await _settle(pilot, MenuScreen)
-        await pilot.press("g")
-        await pilot.pause()
-        assert isinstance(app.screen, DrivePickerScreen)
-
-
-@pytest.mark.asyncio
-async def test_menu_n_opens_nocfo_picker(tmp_path):
-    app = _menu_app(tmp_path)
-    async with app.run_test() as pilot:
-        await _settle(pilot, MenuScreen)
-        await pilot.press("n")
-        await pilot.pause()
-        assert isinstance(app.screen, NoCfoPickerScreen)
-
-
-@pytest.mark.asyncio
-async def test_menu_t_opens_readonly_tree(tmp_path):
-    app = _menu_app(tmp_path)
-    async with app.run_test() as pilot:
-        await _settle(pilot, MenuScreen)
-        await pilot.press("t")
-        await pilot.pause()
-        assert isinstance(app.screen, NoCfoPickerScreen)
-        assert app.screen.choose is False
-
-
-@pytest.mark.asyncio
-async def test_menu_q_quits(tmp_path):
-    app = _menu_app(tmp_path)
-    async with app.run_test() as pilot:
-        await _settle(pilot, MenuScreen)
-        assert isinstance(app.screen, MenuScreen)
-        await pilot.press("q")
-        await pilot.pause()
-        assert app.return_value is None  # app exited (run_test returned)
-
-
-# -- force sync --------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_force_sync_asks_for_confirmation(tmp_path):
-    app = _menu_app(tmp_path)
-    async with app.run_test() as pilot:
-        await _settle(pilot, MenuScreen)
-        await pilot.press("f")
-        await pilot.pause()
-        assert isinstance(app.screen, ConfirmScreen)
-        # declining does nothing
-        await pilot.press("n")
-        await pilot.pause()
-        assert not isinstance(app.screen, ConfirmScreen)
-
-
-@pytest.mark.asyncio
-async def test_menu_s_syncs_and_updates_menu(tmp_path):
-    """Pressing `s` runs the engine against the real SyncEngine + fake client,
-    then `q` returns to the menu with fresh counts."""
-    (tmp_path / "kuitit" / "sub").mkdir(parents=True)
-    (tmp_path / "kuitit" / "sub" / "a.txt").write_text("hello")
+async def test_sync_updates_status_on_return(tmp_path):
+    (tmp_path / "kuitit").mkdir()
+    (tmp_path / "kuitit" / "a.txt").write_text("hello")
     (tmp_path / "kuitit" / "b.txt").write_text("b")
 
-    app = _menu_app(tmp_path)
+    app = make_app(tmp_path, root_folder="kuitit")
     async with app.run_test() as pilot:
-        await _settle(pilot, MenuScreen)
+        await _land_on_list(pilot, app)
         await pilot.press("s")
         for _ in range(80):
             await pilot.pause(0.05)
@@ -413,32 +447,96 @@ async def test_menu_s_syncs_and_updates_menu(tmp_path):
                 break
         progress = app.screen
         assert isinstance(progress, ProgressScreen)
-        assert progress.stats is not None
         assert progress.stats.files_uploaded == 2
-        # the mapping's own state file was used
         assert (tmp_path / ".state" / "kuitit.db").exists()
-        # `q` goes back to the menu and refreshes its counts
         await pilot.press("q")
-        await _settle(pilot, MenuScreen)
-        assert isinstance(app.screen, MenuScreen)
+        screen = await _land_on_list(pilot, app)
         assert app.last_stats is not None
-        assert "2 uploaded" in app.screen.status_text
+        assert "2 uploaded" in screen.status_text
+
+
+@pytest.mark.asyncio
+async def test_S_syncs_all_mappings(tmp_path):
+    app = _two_mapping_app(tmp_path)
+    (tmp_path / "kuitit" / "a.txt").write_text("a")
+    (tmp_path / "laskut" / "b.txt").write_text("b")
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        await pilot.press("S")
+        for _ in range(80):
+            await pilot.pause(0.05)
+            if isinstance(app.screen, SyncAllProgressScreen) and app.screen.finished:
+                break
+        assert isinstance(app.screen, SyncAllProgressScreen)
+        assert app.screen.stats.files_uploaded == 2
+        assert (tmp_path / ".state" / "kuitit.db").exists()
+        assert (tmp_path / ".state" / "laskut.db").exists()
+
+
+@pytest.mark.asyncio
+async def test_f_force_sync_asks_for_confirmation(tmp_path):
+    app = make_app(tmp_path, root_folder="kuitit")
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        await pilot.press("f")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.press("n")
+        await pilot.pause()
+        assert not isinstance(app.screen, ConfirmScreen)
+
+
+@pytest.mark.asyncio
+async def test_F_force_sync_all_asks_for_confirmation(tmp_path):
+    app = _two_mapping_app(tmp_path)
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        await pilot.press("F")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.press("y")
+        for _ in range(80):
+            await pilot.pause(0.05)
+            if isinstance(app.screen, SyncAllProgressScreen) and app.screen.finished:
+                break
+        assert isinstance(app.screen, SyncAllProgressScreen)
 
 
 # -- config persistence ------------------------------------------------------
 
 
-def test_destination_flag_persists(tmp_path):
+def test_destination_flag_and_name_persist(tmp_path):
     from nocfo_sync.config import load_config, save_config
 
     cfg = Config()
     cfg.path = tmp_path / "config.toml"
     cfg.token = "t"
-    cfg.mappings = [make_mapping(tmp_path, destination_folder_id=None,
-                                 destination_chosen=True)]
+    cfg.mappings = [
+        make_mapping(
+            tmp_path,
+            destination_folder_id=7,
+            destination_folder_name="Receipts",
+            destination_chosen=True,
+        )
+    ]
     save_config(cfg)
 
     again = load_config(tmp_path / "config.toml")
     m = again.mappings[0]
     assert m.destination_chosen is True
-    assert m.destination_folder_id is None
+    assert m.destination_folder_id == 7
+    assert m.destination_folder_name == "Receipts"
+    assert m.destination_label == "Receipts"
+
+
+def test_destination_label_handles_root_and_missing_name(tmp_path):
+    assert make_mapping(tmp_path, destination_folder_id=None).destination_label == (
+        "NoCFO root"
+    )
+    assert make_mapping(tmp_path, destination_folder_id=7).destination_label == "7"
+    assert make_mapping(
+        tmp_path, destination_folder_id=7, destination_folder_name="X"
+    ).destination_label == "X"
+    assert make_mapping(
+        tmp_path, destination_chosen=False
+    ).destination_label == "(not selected)"

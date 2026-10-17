@@ -158,6 +158,7 @@ async def test_nocfo_picker_enter_selects_via_keypress():
         await pilot.pause()
         assert app.cancelled is False
         assert app.result == 1
+        assert app.result_name == "Receipts"
 
 
 @pytest.mark.asyncio
@@ -169,6 +170,7 @@ async def test_nocfo_picker_enter_on_root_selects_root():
         await pilot.pause()
         assert app.cancelled is False
         assert app.result is None
+        assert app.result_name is None
 
 
 @pytest.mark.asyncio

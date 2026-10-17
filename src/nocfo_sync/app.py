@@ -1,20 +1,23 @@
 """Unified ``nocfo-sync`` TUI.
 
-One app for the whole workflow:
+One screen does the work: the **mappings list**.  Each row is a Google-Drive
+source folder → NoCFO destination pair, shown by name on both sides, and the
+whole workflow lives on that screen:
 
-* managing several Drive-folder → NoCFO mappings (add / open / remove)
-* first-run setup — token, then a first mapping (business → Drive → NoCFO)
-* running an incremental sync, or a forced re-upload, for a mapping
-* changing a mapping's roots and browsing the NoCFO folder tree
+* ``s`` / ``S``  sync the highlighted mapping, or every mapping
+* ``f`` / ``F``  force sync (re-upload everything) one, or all
+* ``g`` / ``n``  change the highlighted mapping's Drive source / NoCFO destination
+* ``t``          browse the NoCFO folder tree for the highlighted mapping
+* ``a`` / ``d``  add / remove a mapping
+* ``i`` / ``q``  status details / quit
 
-The folder pickers and the progress view live in :mod:`nocfo_sync.picker`;
-this module wires them together and owns the config/state.
+First run (no config) walks you through the token, then a first mapping
+(business → Drive → NoCFO).  The folder pickers and the progress views live in
+:mod:`nocfo_sync.picker`; this module wires them together and owns the
+config/state.
 
 Mappings are not named by the user: a mapping is identified by its Drive
-source folder, which is what the mapping list shows.
-
-The menu deliberately uses letter shortcuts (``s``, ``f``, ``g``, ``n``,
-``t``, ``m``, ``i``, ``q``) rather than numbers.
+source folder, which is what the list shows.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ from .picker import (
     NoCfoPickerScreen,
     NoCfoTreeScreen,
     ProgressScreen,
+    SyncAllProgressScreen,
 )
 from .state import State
 from .sync import SyncEngine, SyncStats
@@ -212,15 +216,17 @@ class InfoScreen(Screen[None]):
 
 
 # --------------------------------------------------------------------------
-# Mapping list
+# The mappings list — the app's single main screen
 # --------------------------------------------------------------------------
 
 
 class MappingsScreen(Screen[None]):
-    """The list of Drive → NoCFO mappings.
+    """The list of Drive → NoCFO mappings and every action on them.
 
-    ``enter`` opens the highlighted mapping; ``a`` adds one, ``d`` removes
-    one, ``s`` syncs one.  Every action is also clickable in the list.
+    Each action is bound to a key and can also be invoked through the posted
+    :class:`ActionRequested` message, so the app owns the behaviour while the
+    screen owns the keys.  Actions that target one mapping carry its row
+    index; ``index`` is None for whole-list actions.
     """
 
     class ActionRequested(Message):
@@ -236,8 +242,15 @@ class MappingsScreen(Screen[None]):
 
     BINDINGS = [
         Binding("s", "sync", "Sync"),
+        Binding("S", "sync_all", "Sync all"),
+        Binding("f", "force", "Force"),
+        Binding("F", "force_all", "Force all"),
+        Binding("g", "drive", "Drive"),
+        Binding("n", "dest", "Destination"),
+        Binding("t", "tree", "Tree"),
         Binding("a", "add", "Add"),
         Binding("d", "remove", "Remove"),
+        Binding("i", "info", "Info"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -259,105 +272,47 @@ class MappingsScreen(Screen[None]):
         self.status_text = text
         self.query_one("#status", Static).update(text)
 
+    def set_options(self, options: list[Option]) -> None:
+        """Replace the rows, keeping the cursor where it was if possible."""
+        listing = self.query_one(OptionList)
+        previous = listing.highlighted
+        listing.clear_options()
+        listing.add_options(options)
+        if options:
+            listing.highlighted = min(previous or 0, len(options) - 1)
+
     def _highlighted(self) -> int | None:
         return self.query_one(OptionList).highlighted
 
-    def on_option_list_option_selected(
-        self, event: OptionList.OptionSelected
-    ) -> None:
-        index = int(event.option.id) if event.option.id is not None else None
-        self.post_message(self.ActionRequested("open", index))
+    def _request(self, action: str, index: int | None = None) -> None:
+        self.post_message(self.ActionRequested(action, index))
 
     def action_sync(self) -> None:
-        self.post_message(self.ActionRequested("sync", self._highlighted()))
+        self._request("sync", self._highlighted())
 
-    def action_add(self) -> None:
-        self.post_message(self.ActionRequested("add"))
-
-    def action_remove(self) -> None:
-        self.post_message(self.ActionRequested("remove", self._highlighted()))
-
-    def action_quit(self) -> None:
-        self.app.exit()
-
-
-# --------------------------------------------------------------------------
-# Menu
-# --------------------------------------------------------------------------
-
-
-class MenuScreen(Screen[None]):
-    """Per-mapping home screen: current setup plus the action list.
-
-    Keys are letters; each action is also clickable in the list.
-    """
-
-    class ActionRequested(Message):
-        def __init__(self, action: str):
-            self.action = action
-            super().__init__()
-
-    CSS = """
-    #status { padding: 1 2; border: round $accent; margin: 1 2 0 2; height: auto; }
-    #actions { margin: 1 2; height: auto; }
-    """
-
-    BINDINGS = [
-        Binding("s", "sync", "Sync"),
-        Binding("f", "force", "Force sync"),
-        Binding("g", "drive", "Drive source"),
-        Binding("n", "nocfo", "NoCFO dest"),
-        Binding("t", "tree", "Folder tree"),
-        Binding("m", "mappings", "Mappings"),
-        Binding("i", "info", "Status"),
-        Binding("q", "quit", "Quit"),
-    ]
-
-    def __init__(self, status_text: str, actions: list[tuple[str, str]]):
-        super().__init__()
-        self.status_text = status_text
-        self.actions = actions
-
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
-        yield Static(self.status_text, id="status")
-        yield OptionList(
-            *[Option(label, id=key) for key, label in self.actions], id="actions"
-        )
-        yield Footer()
-
-    def on_mount(self) -> None:
-        self.query_one(OptionList).focus()
-
-    def set_status(self, text: str) -> None:
-        self.status_text = text
-        self.query_one("#status", Static).update(text)
-
-    def on_option_list_option_selected(
-        self, event: OptionList.OptionSelected
-    ) -> None:
-        self.post_message(self.ActionRequested(event.option.id))
-
-    def _request(self, action: str) -> None:
-        self.post_message(self.ActionRequested(action))
-
-    def action_sync(self) -> None:
-        self._request("sync")
+    def action_sync_all(self) -> None:
+        self._request("sync_all")
 
     def action_force(self) -> None:
-        self._request("force")
+        self._request("force", self._highlighted())
+
+    def action_force_all(self) -> None:
+        self._request("force_all")
 
     def action_drive(self) -> None:
-        self._request("drive")
+        self._request("drive", self._highlighted())
 
-    def action_nocfo(self) -> None:
-        self._request("nocfo")
+    def action_dest(self) -> None:
+        self._request("dest", self._highlighted())
 
     def action_tree(self) -> None:
-        self._request("tree")
+        self._request("tree", self._highlighted())
 
-    def action_mappings(self) -> None:
-        self._request("mappings")
+    def action_add(self) -> None:
+        self._request("add")
+
+    def action_remove(self) -> None:
+        self._request("remove", self._highlighted())
 
     def action_info(self) -> None:
         self._request("info")
@@ -376,7 +331,6 @@ class NocfoSyncApp(App[None]):
 
     CSS = """
     #status { padding: 1 2; border: round $accent; margin: 1 2 0 2; height: auto; }
-    #actions { margin: 1 2; height: auto; }
     #info { padding: 1 2; }
     """
 
@@ -389,134 +343,91 @@ class NocfoSyncApp(App[None]):
                 cfg.base_url, cfg.token, slug, idempotency=cfg.idempotency
             )
         )
-        self.mapping: Mapping | None = None  # the mapping opened this session
         self._new_mapping: Mapping | None = None  # being built by the wizard
         self.last_stats: SyncStats | None = None
         self.user_email: str | None = None
         self._api_error: str | None = None
+        self._resolving_names = False
 
     # -- helpers ---------------------------------------------------------
 
     def _client(self, slug: str) -> NoCfoClient:
         return self._make_client(slug)
 
-    def _banner(self) -> str | None:
-        if self._api_error:
-            return f"NoCFO unreachable: {self._api_error}"
-        m = self.mapping
-        if m is None:
-            return None
-        if not m.root_folder:
-            return "Drive source not selected — press g to choose one."
-        if not m.destination_chosen:
-            return "NoCFO destination not selected — press n to choose one."
-        return None
-
-    def _tracked_files(self, mapping: Mapping) -> int:
-        path = self.cfg.state_path_for(mapping)
-        if not path.exists():
-            return 0
-        state = State(path)
+    def _root_path(self, mapping: Mapping) -> Path | None:
         try:
-            return len(state.all_file_relpaths())
-        finally:
-            state.close()
+            return mapping.root_path
+        except ConfigError as e:
+            self.notify(str(e), severity="error")
+            return None
+
+    def _row_label(self, mapping: Mapping, width: int) -> str:
+        """One list row: ``<drive source>  →  <business> · <NoCFO folder>``."""
+        plain = mapping.root_folder or "(no Drive source)"
+        pad = " " * max(1, width - len(plain) + 2)
+        drive = plain if mapping.root_folder else f"[red]{plain}[/red]"
+        dest = (
+            mapping.destination_label
+            if mapping.destination_chosen
+            else "[red](no destination)[/red]"
+        )
+        return f"{drive}{pad}[dim]→[/dim] {mapping.business_slug or '?'} › {dest}"
 
     def _mapping_options(self) -> list[Option]:
-        options: list[Option] = []
-        for i, m in enumerate(self.cfg.mappings):
-            root = m.root_folder or "(no Drive source)"
-            options.append(
-                Option(
-                    f"{root}  [dim]→ {m.business_slug or '?'} · "
-                    f"{m.destination_label}[/dim]",
-                    id=str(i),
-                )
-            )
-        return options
+        labels = [m.root_folder or "(no Drive source)" for m in self.cfg.mappings]
+        width = min(max((len(x) for x in labels), default=0), 40)
+        return [
+            Option(self._row_label(m, width), id=str(i))
+            for i, m in enumerate(self.cfg.mappings)
+        ]
 
     def _mappings_status(self) -> str:
-        who = f"  [dim]({self.user_email})[/dim]" if self.user_email else ""
-        lines = [f"[b]NoCFO[/b]  {self.cfg.base_url}{who}"]
-        if not self.cfg.mappings:
-            lines.append("No mappings yet.")
-        else:
-            lines.append(
-                f"[b]{len(self.cfg.mappings)}[/b] mapping(s) — "
-                "[b]enter[/b] open   [b]s[/b] sync   [b]a[/b] add   [b]d[/b] remove"
-            )
-        banner = self._banner()
-        if banner:
-            lines.append(f"[yellow]{banner}[/yellow]")
-        return "\n".join(lines)
-
-    def _status_text(self) -> str:
-        cfg = self.cfg
-        m = self.mapping
-        who = f"  [dim]({self.user_email})[/dim]" if self.user_email else ""
-        lines = [f"[b]NoCFO[/b]  {cfg.base_url}{who}"]
-        if m is not None:
-            lines.append(
-                f"[b]Mapping[/b] {m.label}  "
-                f"business=[b]{m.business_slug or '(unset)'}[/b]"
-            )
-            if m.root_folder:
-                lines.append(
-                    f"[b]Drive[/b]  {m.root_folder}  [dim]({m.mount})[/dim]"
-                )
-            else:
-                lines.append("[b]Drive[/b]  [red]not selected[/red]")
-            dest = m.destination_label
-            if not m.destination_chosen:
-                dest += "  [red]not selected[/red]"
-            lines.append(f"[b]Dest[/b]   {dest}")
-            lines.append(
-                f"[b]State[/b]  {self._tracked_files(m)} files tracked  "
-                f"[dim]({cfg.state_path_for(m)})[/dim]"
-            )
+        header = f"[b]NoCFO[/b]  {self.cfg.base_url}"
+        if self.user_email:
+            header += f"  [dim]({self.user_email})[/dim]"
+        count = len(self.cfg.mappings)
+        lines = [header, "No mappings yet." if count == 0 else f"[b]{count}[/b] mapping(s)"]
         if self.last_stats:
             s = self.last_stats
             lines.append(
-                f"[b]Last[/b]   {s.files_uploaded} uploaded, {s.files_updated} updated, "
-                f"{s.files_skipped_unchanged} unchanged, {len(s.errors)} errors"
+                f"[dim]last run: {s.files_uploaded} uploaded, "
+                f"{s.files_updated} updated, {s.files_skipped_unchanged} unchanged, "
+                f"{len(s.errors)} errors[/dim]"
             )
-        banner = self._banner()
-        if banner:
-            lines.append(f"[yellow]{banner}[/yellow]")
+        if self._api_error:
+            lines.append(f"[yellow]NoCFO unreachable: {self._api_error}[/yellow]")
+        incomplete = [
+            m for m in self.cfg.mappings
+            if not m.root_folder or not m.destination_chosen
+        ]
+        if incomplete:
+            lines.append(
+                f"[yellow]{len(incomplete)} mapping(s) still need a Drive source "
+                "or a NoCFO destination[/yellow]"
+            )
         return "\n".join(lines)
 
     def _info_text(self) -> str:
         cfg = self.cfg
-        m = self.mapping
         rows = [
             f"config:      {cfg.path or '(none — using defaults)'}",
             f"base_url:    {cfg.base_url}",
             f"user:        {self.user_email or '(unknown)'}",
             f"token:       {'set' if cfg.token else 'MISSING'}",
         ]
-        if m is not None:
+        if not cfg.mappings:
+            rows.append("mappings:    (none)")
+            return "\n".join(rows)
+        rows.append("")
+        for m in cfg.mappings:
             rows += [
-                f"mapping:     {m.label}",
-                f"state:       {cfg.state_path_for(m)}",
-                f"business:    {m.business_slug or '(unset)'}",
-                f"mount:       {m.mount}  "
-                f"{'(exists)' if m.mount.is_dir() else '(MISSING)'}",
-                f"drive root:  {m.root_folder or '(not selected)'}",
-                f"destination: {m.destination_label}",
+                f"[b]{m.label}[/b]",
+                f"  drive:       {m.root_folder or '(not selected)'}   ({m.mount})",
+                f"  business:    {m.business_slug or '(unset)'}",
+                f"  destination: {m.destination_label}",
+                f"  state:       {cfg.state_path_for(m)}",
             ]
         return "\n".join(rows)
-
-    def _actions(self) -> list[tuple[str, str]]:
-        return [
-            ("sync", "[b]s[/b]  Sync                [dim]upload new/changed files[/dim]"),
-            ("force", "[b]f[/b]  Force sync          [dim]re-upload everything[/dim]"),
-            ("drive", "[b]g[/b]  Google Drive source"),
-            ("nocfo", "[b]n[/b]  NoCFO destination"),
-            ("tree", "[b]t[/b]  Show NoCFO folder tree"),
-            ("mappings", "[b]m[/b]  All mappings"),
-            ("info", "[b]i[/b]  Status / details"),
-            ("quit", "[b]q[/b]  Quit"),
-        ]
 
     # -- startup ---------------------------------------------------------
 
@@ -528,8 +439,6 @@ class NocfoSyncApp(App[None]):
         """Show the right starting screen for the current config."""
         if not self.cfg.mappings:
             self._add_mapping()
-        elif len(self.cfg.mappings) == 1:
-            self._open_mapping(self.cfg.mappings[0])
         else:
             self._show_mappings()
 
@@ -585,12 +494,10 @@ class NocfoSyncApp(App[None]):
             lambda _r: self.exit(),
         )
 
-    # -- mapping list ----------------------------------------------------
-
     # -- navigation ------------------------------------------------------
 
     def _home(self, screen: Screen) -> None:
-        """Show a top-level screen (mapping list or a mapping's menu).
+        """Show the main screen.
 
         Textual can't ``switch_screen`` the base default screen (it has no
         result callback), so the first home screen is *pushed*; after that we
@@ -602,10 +509,58 @@ class NocfoSyncApp(App[None]):
 
     def _show_mappings(self) -> None:
         self._home(MappingsScreen(self._mappings_status(), self._mapping_options()))
+        self._resolve_missing_names()
 
-    def _open_mapping(self, mapping: Mapping) -> None:
-        self.mapping = mapping
-        self._home(MenuScreen(self._status_text(), self._actions()))
+    def _refresh_mappings(self) -> None:
+        screen = self.screen
+        if isinstance(screen, MappingsScreen):
+            screen.set_status(self._mappings_status())
+            screen.set_options(self._mapping_options())
+
+    # -- live destination-name lookup ------------------------------------
+
+    def _resolve_missing_names(self) -> None:
+        """Best-effort: fill in destination names we don't have cached.
+
+        Hand-edited configs store only the folder id, so the list can't show a
+        name for them.  Look each missing one up once, in the background, and
+        cache it back into the config."""
+        todo = [
+            m for m in self.cfg.mappings
+            if m.destination_chosen
+            and m.destination_folder_id is not None
+            and not m.destination_folder_name
+        ]
+        if not todo or self._resolving_names:
+            return
+        self._resolving_names = True
+        self.run_worker(
+            lambda: self._resolve_names_worker(todo), thread=True, name="resolve-names"
+        )
+
+    def _resolve_names_worker(self, todo: list[Mapping]) -> None:
+        changed = False
+        for m in todo:
+            client = self._client(m.business_slug)
+            try:
+                name = client.get_folder(m.destination_folder_id).name
+            except NoCfoError:
+                continue
+            finally:
+                client.close()
+            if name:
+                m.destination_folder_name = name
+                changed = True
+        self.call_from_thread(self._names_resolved, changed)
+
+    def _names_resolved(self, changed: bool) -> None:
+        self._resolving_names = False
+        if not changed:
+            return
+        save_config(self.cfg)
+        self._refresh_mappings()
+
+    # -- mapping actions -------------------------------------------------
 
     def on_mappings_screen_action_requested(
         self, message: MappingsScreen.ActionRequested
@@ -614,14 +569,29 @@ class NocfoSyncApp(App[None]):
         if action == "add":
             self._add_mapping()
             return
+        if action == "sync_all":
+            self._start_sync_all(force=False)
+            return
+        if action == "force_all":
+            self._confirm_force_all()
+            return
+        if action == "info":
+            self.push_screen(InfoScreen(self._info_text()))
+            return
         if index is None or not (0 <= index < len(self.cfg.mappings)):
+            self.notify("no mapping selected", severity="warning")
             return
         mapping = self.cfg.mappings[index]
-        if action == "open":
-            self._open_mapping(mapping)
-        elif action == "sync":
-            self._open_mapping(mapping)
-            self._start_sync(force=False)
+        if action == "sync":
+            self._start_sync(mapping, force=False)
+        elif action == "force":
+            self._confirm_force(mapping)
+        elif action == "drive":
+            self._change_drive(mapping)
+        elif action == "dest":
+            self._change_dest(mapping)
+        elif action == "tree":
+            self._show_tree(mapping)
         elif action == "remove":
             self._confirm_remove(mapping)
 
@@ -637,14 +607,181 @@ class NocfoSyncApp(App[None]):
 
     def _do_remove(self, mapping: Mapping) -> None:
         self.cfg.mappings.remove(mapping)
-        if self.mapping is mapping:
-            self.mapping = None
         save_config(self.cfg)
         self.notify(f"removed mapping {mapping.label}")
         if not self.cfg.mappings:
             self.exit()
             return
-        self._land()
+        self._show_mappings()
+
+    # -- syncing ---------------------------------------------------------
+
+    def _prepare_sync(
+        self, mapping: Mapping, force: bool, quiet: bool = False
+    ) -> tuple[NoCfoClient, State, SyncEngine] | None:
+        """Validate a mapping and build its client/state/engine, or None."""
+        root = self._root_path(mapping)
+        if root is None or not root.is_dir():
+            if not quiet:
+                self.notify(
+                    f"{mapping.label}: choose a Google Drive source first (g)",
+                    severity="warning",
+                )
+            return None
+        if not mapping.destination_chosen:
+            if not quiet:
+                self.notify(
+                    f"{mapping.label}: choose a NoCFO destination first (n)",
+                    severity="warning",
+                )
+            return None
+        client = self._client(mapping.business_slug)
+        try:
+            client.check()
+        except NoCfoError as e:
+            client.close()
+            if not quiet:
+                self.notify(
+                    f"{mapping.label}: cannot reach NoCFO: {e}", severity="error"
+                )
+            return None
+        state = State(self.cfg.state_path_for(mapping))
+        engine = SyncEngine(
+            client, state, root, mapping.destination_folder_id, force=force
+        )
+        return client, state, engine
+
+    def _start_sync(self, mapping: Mapping, force: bool) -> None:
+        prepared = self._prepare_sync(mapping, force)
+        if prepared is None:
+            return
+        client, state, engine = prepared
+        self.push_screen(
+            ProgressScreen(engine, force=force),
+            lambda stats: self._sync_done(stats, client, state),
+        )
+
+    def _sync_done(
+        self, stats: SyncStats | None, client: NoCfoClient, state: State
+    ) -> None:
+        self.last_stats = stats
+        if stats is not None and stats.errors:
+            for err in stats.errors[:5]:
+                self.notify(err, severity="error", timeout=8)
+        try:
+            client.close()
+        finally:
+            state.close()
+        self._refresh_mappings()
+
+    def _confirm_force(self, mapping: Mapping) -> None:
+        self.push_screen(
+            ConfirmScreen(
+                "Force sync?",
+                f"{mapping.label} — every file is re-uploaded, ignoring the "
+                "unchanged check. Old copies are deleted only when they are not "
+                "attached to a document.",
+            ),
+            lambda ok: self._start_sync(mapping, force=True) if ok else None,
+        )
+
+    def _start_sync_all(self, force: bool) -> None:
+        jobs: list[tuple[str, SyncEngine]] = []
+        resources: list[tuple[NoCfoClient, State]] = []
+        skipped: list[str] = []
+        for mapping in self.cfg.mappings:
+            prepared = self._prepare_sync(mapping, force, quiet=True)
+            if prepared is None:
+                skipped.append(mapping.label)
+                continue
+            client, state, engine = prepared
+            jobs.append((mapping.label, engine))
+            resources.append((client, state))
+        if not jobs:
+            for client, state in resources:
+                client.close()
+                state.close()
+            self.notify(
+                "nothing to sync — check each mapping's Drive source and "
+                "destination",
+                severity="warning",
+                timeout=8,
+            )
+            return
+        if skipped:
+            self.notify("skipped: " + ", ".join(skipped), severity="warning", timeout=8)
+        self.push_screen(
+            SyncAllProgressScreen(jobs, force=force),
+            lambda stats: self._sync_all_done(stats, resources),
+        )
+
+    def _sync_all_done(
+        self, stats: SyncStats | None, resources: list[tuple[NoCfoClient, State]]
+    ) -> None:
+        self.last_stats = stats
+        if stats is not None and stats.errors:
+            for err in stats.errors[:8]:
+                self.notify(err, severity="error", timeout=8)
+        for client, state in resources:
+            try:
+                client.close()
+            finally:
+                state.close()
+        self._refresh_mappings()
+
+    def _confirm_force_all(self) -> None:
+        count = len(self.cfg.mappings)
+        self.push_screen(
+            ConfirmScreen(
+                "Force sync all?",
+                f"All {count} mapping(s) are re-uploaded in full, ignoring the "
+                "unchanged check. Old copies are deleted only when they are not "
+                "attached to a document.",
+            ),
+            lambda ok: self._start_sync_all(force=True) if ok else None,
+        )
+
+    # -- editing a mapping -----------------------------------------------
+
+    def _change_drive(self, mapping: Mapping) -> None:
+        self.push_screen(
+            DrivePickerScreen(mapping.mount, self._root_path(mapping)),
+            lambda picked: self._on_change_drive(mapping, picked),
+        )
+
+    def _on_change_drive(self, mapping: Mapping, picked: Path | None) -> None:
+        if picked is None:
+            return
+        mapping.root_folder = picked.relative_to(mapping.mount.resolve()).as_posix()
+        save_config(self.cfg)
+        self.notify(f"Drive source: {mapping.root_folder}")
+        self._refresh_mappings()
+
+    def _change_dest(self, mapping: Mapping) -> None:
+        client = self._client(mapping.business_slug)
+        self.push_screen(
+            NoCfoPickerScreen(client, mapping.destination_folder_id),
+            lambda choice: self._on_change_dest(mapping, choice, client),
+        )
+
+    def _on_change_dest(
+        self, mapping: Mapping, choice: NocfoChoice, client: NoCfoClient
+    ) -> None:
+        try:
+            if choice.cancelled:
+                return
+            mapping.destination_folder_id = choice.folder_id
+            mapping.destination_folder_name = choice.folder_name
+            mapping.destination_chosen = True
+            save_config(self.cfg)
+            self.notify(f"destination → {mapping.destination_label}")
+        finally:
+            client.close()
+        self._refresh_mappings()
+
+    def _show_tree(self, mapping: Mapping) -> None:
+        client = self._client(mapping.business_slug)
+        self.push_screen(NoCfoTreeScreen(client), lambda _choice: client.close())
 
     # -- add-mapping wizard ----------------------------------------------
 
@@ -703,6 +840,7 @@ class NocfoSyncApp(App[None]):
                 self._cancel_add()
                 return
             self._new_mapping.destination_folder_id = choice.folder_id
+            self._new_mapping.destination_folder_name = choice.folder_name
             self._new_mapping.destination_chosen = True
             self.cfg.mappings.append(self._new_mapping)
             save_config(self.cfg)
@@ -718,135 +856,6 @@ class NocfoSyncApp(App[None]):
             self.exit()
             return
         self._land()
-
-    # -- menu actions ----------------------------------------------------
-
-    def on_menu_screen_action_requested(
-        self, message: MenuScreen.ActionRequested
-    ) -> None:
-        handlers = {
-            "sync": lambda: self._start_sync(force=False),
-            "force": self._confirm_force,
-            "drive": self._change_drive,
-            "nocfo": self._change_dest,
-            "tree": self._show_tree,
-            "mappings": self._show_mappings,
-            "info": lambda: self.push_screen(InfoScreen(self._info_text())),
-            "quit": self.exit,
-        }
-        handler = handlers.get(message.action)
-        if handler is not None:
-            handler()
-
-    def _root_path(self, mapping: Mapping) -> Path | None:
-        try:
-            return mapping.root_path
-        except ConfigError as e:
-            self.notify(str(e), severity="error")
-            return None
-
-    def _start_sync(self, force: bool) -> None:
-        m = self.mapping
-        if m is None:
-            self.notify("no mapping selected", severity="warning")
-            return
-        root = self._root_path(m)
-        if root is None or not root.is_dir():
-            self.notify("select a Google Drive source first (press g)", severity="warning")
-            return
-        if not m.destination_chosen:
-            self.notify("select a NoCFO destination first (press n)", severity="warning")
-            return
-        client = self._client(m.business_slug)
-        try:
-            client.check()
-        except NoCfoError as e:
-            client.close()
-            self.notify(f"cannot reach NoCFO: {e}", severity="error")
-            return
-        state = State(self.cfg.state_path_for(m))
-        engine = SyncEngine(
-            client, state, root, m.destination_folder_id, force=force
-        )
-        self.push_screen(
-            ProgressScreen(engine, force=force),
-            lambda stats: self._sync_done(stats, client, state),
-        )
-
-    def _sync_done(
-        self, stats: SyncStats | None, client: NoCfoClient, state: State
-    ) -> None:
-        self.last_stats = stats
-        if stats is not None and stats.errors:
-            for err in stats.errors[:5]:
-                self.notify(err, severity="error", timeout=8)
-        try:
-            client.close()
-        finally:
-            state.close()
-        self._refresh_menu()
-
-    def _confirm_force(self) -> None:
-        self.push_screen(
-            ConfirmScreen(
-                "Force sync?",
-                "Every file is re-uploaded, ignoring the unchanged check. Old "
-                "copies are deleted only when they are not attached to a document.",
-            ),
-            lambda ok: self._start_sync(force=True) if ok else None,
-        )
-
-    def _change_drive(self) -> None:
-        m = self.mapping
-        if m is None:
-            return
-        self.push_screen(
-            DrivePickerScreen(m.mount, self._root_path(m)),
-            self._on_change_drive,
-        )
-
-    def _on_change_drive(self, picked: Path | None) -> None:
-        if picked is None or self.mapping is None:
-            return
-        m = self.mapping
-        m.root_folder = picked.relative_to(m.mount.resolve()).as_posix()
-        save_config(self.cfg)
-        self.notify(f"Drive source: {m.root_folder}")
-        self._refresh_menu()
-
-    def _change_dest(self) -> None:
-        m = self.mapping
-        if m is None:
-            return
-        client = self._client(m.business_slug)
-        self.push_screen(
-            NoCfoPickerScreen(client, m.destination_folder_id),
-            lambda choice: self._on_change_dest(choice, client),
-        )
-
-    def _on_change_dest(self, choice: NocfoChoice, client: NoCfoClient) -> None:
-        try:
-            if choice.cancelled or self.mapping is None:
-                return
-            self.mapping.destination_folder_id = choice.folder_id
-            self.mapping.destination_chosen = True
-            save_config(self.cfg)
-            self.notify("NoCFO destination updated")
-        finally:
-            client.close()
-        self._refresh_menu()
-
-    def _show_tree(self) -> None:
-        m = self.mapping
-        if m is None:
-            return
-        client = self._client(m.business_slug)
-        self.push_screen(NoCfoTreeScreen(client), lambda _choice: client.close())
-
-    def _refresh_menu(self) -> None:
-        screen = self.screen
-        if isinstance(screen, MenuScreen):
-            screen.set_status(self._status_text())
 
 
 def run_tui(cfg: Config) -> None:

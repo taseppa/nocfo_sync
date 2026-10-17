@@ -10,7 +10,8 @@ with a personal access token.
 You can keep **several mappings**: each one is a Drive folder → NoCFO
 destination pair (optionally into a different business). They share the token
 and API base URL, and each keeps its own sync state. Mappings are not named —
-the TUI just shows the Drive folder you picked.
+the TUI identifies each one by the Drive folder you picked and shows the
+matching NoCFO destination beside it.
 
 ```
 Google Drive for Desktop mount          NoCFO
@@ -64,6 +65,7 @@ business_slug = "acme"
 mount = "~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive"
 root_folder = "Receipts"             # relative to mount
 destination_folder_id = 1234         # omit for the NoCFO root
+destination_folder_name = "Receipts 2026"   # label the TUI shows (optional)
 destination_selected = true
 
 [[mapping]]                          # a second mapping, same or other business
@@ -105,32 +107,31 @@ Just run it with no arguments — the TUI is the normal way to use the tool:
 
 ### The TUI
 
-It opens on your **mappings** — one row per Drive → NoCFO pair. `enter` opens
-the highlighted one, and its menu does the work.
+It opens on your **mappings** — the whole app is that one screen. Each row is a
+Drive source folder → NoCFO destination pair, shown by name on both sides:
+
+```
+ ~/…/My Drive/Receipts   →  acme · Receipts 2026
+ ~/…/My Drive/Invoices   →  acme · NoCFO root
+```
 
 | Key | Action |
 |---|---|
-| `enter` | Open the highlighted mapping |
 | `s` | Sync the highlighted mapping |
+| `S` | Sync **all** mappings, one after another |
+| `f` | Force sync the highlighted mapping — re-upload everything (asks `y`/`n`) |
+| `F` | Force sync all mappings (asks `y`/`n`) |
+| `g` | Change the highlighted mapping's Google Drive source folder |
+| `n` | Change the highlighted mapping's NoCFO destination folder |
+| `t` | Show the NoCFO folder tree for the highlighted mapping (read-only) |
 | `a` | Add a mapping |
 | `d` | Remove the highlighted mapping |
-| `q` | Quit |
-
-Inside a mapping:
-
-| Key | Action |
-|---|---|
-| `s` | Sync (upload new/changed files) |
-| `f` | Force sync — re-upload everything (asks `y`/`n` first) |
-| `g` | Change the Google Drive source folder |
-| `n` | Change the NoCFO destination folder |
-| `t` | Show the NoCFO folder tree (read-only) |
-| `m` | Back to the mappings list |
 | `i` | Status / details (config path, state path, …) |
 | `q` | Quit |
 
-Each action is also clickable in the list. Syncing shows a progress bar and a
-live log; when it finishes the panel updates with the counts.
+The list always opens on the top mapping; nothing is stored about which one you
+were on. Syncing shows a progress bar and a live log and finishes with the
+counts; syncing all runs each mapping in turn and reports a combined total.
 
 ### First run
 
@@ -142,10 +143,10 @@ With nothing configured the TUI walks you through setup automatically:
 3. **Drive source** — browse the Drive mount and choose a folder to sync.
 4. **NoCFO destination** — choose where files land (or the NoCFO root).
 
-That creates your first mapping; each answer is saved to `config.toml` as you
-go. Press `a` on the mappings screen to add more. Cancelling a step drops you
-back without saving anything; the `g` / `n` keys edit the open mapping, so
-nothing is a dead end. If the Drive mount can't be found (Google Drive for
+That creates your first mapping and drops you on the list; each answer is saved
+to `config.toml` as you go. Press `a` to add more. Cancelling a step drops you
+back without saving anything; the `g` / `n` keys edit the highlighted mapping,
+so nothing is a dead end. If the Drive mount can't be found (Google Drive for
 Desktop not running) the picker says so instead of showing a broken tree.
 
 ### Command line (for cron / scripting)
