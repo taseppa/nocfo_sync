@@ -3,8 +3,8 @@
 # through the token and both folders and writes this file for you.
 
 [nocfo]
-# Production: https://api.nocfo.io   Test: https://api-tst.nocfo.io
-base_url = "https://api-tst.nocfo.io"
+# Production (default): https://api.nocfo.io   Test: https://api-tst.nocfo.io
+base_url = "https://api.nocfo.io"
 token = "your-personal-access-token"
 business_slug = "your-business-slug"
 # Send Idempotency-Key on uploads (see README: api-tst rejects it with 500).
