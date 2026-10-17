@@ -1,4 +1,6 @@
 # Copy to config.toml and fill in.  config.toml is git-ignored.
+# Easiest path: just run `nocfo-sync` with no arguments — the TUI walks you
+# through the token and both folders and writes this file for you.
 
 [nocfo]
 # Production: https://api.nocfo.io   Test: https://api-tst.nocfo.io
@@ -11,9 +13,12 @@ idempotency = true
 [gdrive]
 # Google Drive for Desktop mount point.
 mount = "~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive"
-# Folder to sync, relative to the mount.  Leave empty and run
-# `nocfo-sync pick-drive-root` (or just `nocfo-sync sync`) to choose it.
+# Folder to sync, relative to the mount.  Leave empty and the TUI (or
+# `nocfo-sync pick-drive-root`) will ask you to choose one.
 root_folder = ""
 # NoCFO destination folder id.  Omit the line entirely to use the NoCFO root,
 # or run `nocfo-sync pick-destination` to choose one.
 # destination_folder_id = 1234
+# Whether a destination was chosen at all.  Distinguishes "not chosen yet"
+# (false) from "chose the NoCFO root" (true with no destination_folder_id).
+destination_selected = false

@@ -1,8 +1,15 @@
-"""Textual TUI: Drive folder picker, NoCFO destination picker, sync progress."""
+"""Textual TUI building blocks: folder pickers and sync progress.
+
+Each piece is a ``Screen`` so it can live inside the unified ``nocfo-sync``
+app (see ``app.py``).  Thin ``App`` wrappers are kept for the standalone CLI
+commands (``pick-drive-root``, ``pick-destination``, ``sync``) and their
+tests.
+"""
 
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -87,8 +94,11 @@ class FolderTree(Tree):
 # --------------------------------------------------------------------------
 
 
-class DriveFolderPicker(App[Path | None]):
-    """Browse the local Drive mount, select a folder to sync from."""
+class DrivePickerScreen(Screen[Path | None]):
+    """Browse the local Drive mount, select a folder to sync from.
+
+    Dismisses with the chosen path, or None when cancelled.
+    """
 
     CSS = """
     #tree { height: 1fr; }
@@ -103,10 +113,15 @@ class DriveFolderPicker(App[Path | None]):
         super().__init__()
         self.mount_path = mount.resolve()
         self.preselect = preselect.resolve() if preselect else None
-        self.result: Path | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
+        if not self.mount_path.is_dir():
+            yield Static(
+                "[red]Drive mount not found[/red] at "
+                f"{self.mount_path}\n"
+                "Is Google Drive for Desktop installed, running and synced?"
+            )
         yield Static(f"Select a Google Drive folder  [dim]({self.mount_path})[/dim]")
         tree: FolderTree[Path] = FolderTree("My Drive", data=self.mount_path)
         tree.on_choose = self.action_select
@@ -189,14 +204,54 @@ class DriveFolderPicker(App[Path | None]):
         self.call_after_refresh(self.tree.select_node, node)
         self.call_after_refresh(self.tree.scroll_to_node, node)
 
-    def action_select(self) -> None:
+    def current_choice(self) -> Path | None | bool:
+        """The path under the cursor, or ``None`` if the cursor is invalid.
+
+        Returns ``False`` to mean "no valid choice" so callers can tell an
+        empty cursor apart from a cancelled pick.
+        """
         node = self.tree.cursor_node
-        if node is not None and node.data is not None:
-            self.result = node.data
-            self.exit(self.result)
+        if node is None or node.data is None:
+            return False
+        return node.data
+
+    def action_select(self) -> None:
+        choice = self.current_choice()
+        if choice is not False:
+            self.dismiss(choice)
 
     def action_cancel(self) -> None:
-        self.exit(None)
+        self.dismiss(None)
+
+
+class DriveFolderPicker(App[Path | None]):
+    """Standalone wrapper around :class:`DrivePickerScreen` (CLI + tests)."""
+
+    def __init__(self, mount: Path, preselect: Path | None = None):
+        super().__init__()
+        self.result: Path | None = None
+        self._screen = DrivePickerScreen(mount, preselect)
+
+    def on_mount(self) -> None:
+        self.push_screen(self._screen, self._chosen)
+
+    def _chosen(self, result: Path | None) -> None:
+        self.result = result
+        self.exit(result)
+
+    @property
+    def tree(self) -> FolderTree[Path]:
+        return self._screen.tree
+
+    def action_select(self) -> None:
+        choice = self._screen.current_choice()
+        if choice is not False:
+            self.result = choice
+            self._screen.dismiss(choice)
+
+    def action_cancel(self) -> None:
+        self.result = None
+        self._screen.dismiss(None)
 
 
 # --------------------------------------------------------------------------
@@ -204,12 +259,25 @@ class DriveFolderPicker(App[Path | None]):
 # --------------------------------------------------------------------------
 
 
-class NoCfoFolderPicker(App[int | None]):
-    """Browse NoCFO folders, select the sync destination root.
+@dataclass
+class NocfoChoice:
+    """Result of the NoCFO picker.
 
-    Returns the chosen folder id, or None for "NoCFO root" (select the root
-    node itself).  Cancelling returns None too — the caller distinguishes
-    via the ``cancelled`` flag.
+    ``folder_id`` is None both for "the NoCFO root" and for a cancel, so
+    ``cancelled`` carries the distinction (selecting the root is a real
+    choice, not a cancel).
+    """
+
+    folder_id: int | None = None
+    cancelled: bool = False
+
+
+class NoCfoPickerScreen(Screen[NocfoChoice]):
+    """Browse NoCFO folders.
+
+    With ``choose=True`` (the default) ``enter`` dismisses with the folder
+    under the cursor and ``n`` creates a new one.  With ``choose=False`` the
+    tree is read-only, which is how the TUI shows the whole folder tree.
     """
 
     CSS = """
@@ -222,26 +290,35 @@ class NoCfoFolderPicker(App[int | None]):
         ("q,escape", "cancel", "Cancel"),
     ]
 
-    def __init__(self, client: NoCfoClient, preselect: int | None = None):
+    def __init__(
+        self,
+        client: NoCfoClient,
+        preselect: int | None = None,
+        choose: bool = True,
+    ):
         super().__init__()
         self.client = client
         self.preselect = preselect
-        self.result: int | None = None
-        self.cancelled = True
+        self.choose = choose
         self._new_folder_parent: TreeNode[int | None] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
-        yield Static("Select the NoCFO destination folder")
+        yield Static(
+            "Select the NoCFO destination folder"
+            if self.choose
+            else "NoCFO folders"
+        )
         tree: FolderTree[int | None] = FolderTree("NoCFO root", data=None)
-        tree.on_choose = self.action_select
+        tree.on_choose = self.action_select if self.choose else None
         tree.root.expand()
         self._populate_root(tree.root)
         yield tree
-        yield Label(
-            "→ open   ← close   enter = sync into here   n = new folder   q/esc = cancel",
-            id="hint",
-        )
+        if self.choose:
+            hint = "→ open   ← close   enter = sync into here   n = new folder   q/esc = cancel"
+        else:
+            hint = "→ open   ← close   q/esc = back"
+        yield Label(hint, id="hint")
         yield Footer()
 
     @property
@@ -286,18 +363,30 @@ class NoCfoFolderPicker(App[int | None]):
         if _is_placeholder(node):
             self._populate_children(node)
 
-    def action_select(self) -> None:
+    def refresh_node(self, node: TreeNode[int | None]) -> None:
+        """Re-read a node's children (used after creating a folder)."""
+        if node is self.tree.root:
+            self._populate_root(node)
+        else:
+            self._populate_children(node)
+
+    def current_choice(self) -> NocfoChoice | None:
         node = self.tree.cursor_node
         if node is None:
-            return
-        self.result = node.data  # None = NoCFO root (the root node)
-        self.cancelled = False
-        self.exit(self.result)
+            return None
+        return NocfoChoice(folder_id=node.data, cancelled=False)
+
+    def action_select(self) -> None:
+        choice = self.current_choice()
+        if choice is not None:
+            self.dismiss(choice)
 
     def action_cancel(self) -> None:
-        self.exit(None)
+        self.dismiss(NocfoChoice(folder_id=None, cancelled=True))
 
     def action_new_folder(self) -> None:
+        if not self.choose:
+            return
         node = self.tree.cursor_node
         if node is None:
             return
@@ -313,14 +402,61 @@ class NoCfoFolderPicker(App[int | None]):
             except NoCfoError as e:
                 self.notify(f"create failed: {e}", severity="error")
                 return
-            if parent is self.tree.root:
-                self._populate_root(parent)
-            else:
-                self._populate_children(parent)
+            self.refresh_node(parent)
             parent.expand()
             self.notify(f"created folder {name!r} ({created.id})")
 
-        self.push_screen(NewFolderScreen(), handle)
+        self.app.push_screen(NewFolderScreen(), handle)
+
+
+class NoCfoTreeScreen(NoCfoPickerScreen):
+    """Read-only view of the whole NoCFO folder tree (the TUI's 'show tree')."""
+
+    BINDINGS = [("q,escape", "back", "Back")]
+
+    def __init__(self, client: NoCfoClient):
+        super().__init__(client, choose=False)
+
+    def action_new_folder(self) -> None:  # `n` is not bound here
+        return
+
+    def action_back(self) -> None:
+        self.dismiss(NocfoChoice(folder_id=None, cancelled=True))
+
+
+class NoCfoFolderPicker(App[int | None]):
+    """Standalone wrapper around :class:`NoCfoPickerScreen` (CLI + tests)."""
+
+    def __init__(self, client: NoCfoClient, preselect: int | None = None):
+        super().__init__()
+        self.result: int | None = None
+        self.cancelled = True
+        self._screen = NoCfoPickerScreen(client, preselect)
+
+    def on_mount(self) -> None:
+        self.push_screen(self._screen, self._chosen)
+
+    def _chosen(self, choice: NocfoChoice) -> None:
+        self.result = choice.folder_id
+        self.cancelled = choice.cancelled
+        self.exit(self.result)
+
+    @property
+    def tree(self) -> FolderTree[int | None]:
+        return self._screen.tree
+
+    def action_select(self) -> None:
+        choice = self._screen.current_choice()
+        if choice is None:
+            return
+        self.result = choice.folder_id
+        self.cancelled = choice.cancelled
+        self._screen.dismiss(choice)
+
+    def action_cancel(self) -> None:
+        self.result = None
+        self.cancelled = True
+        self._screen.dismiss(NocfoChoice(folder_id=None, cancelled=True))
 
 
 class NewFolderScreen(Screen[str | None]):
@@ -351,8 +487,12 @@ class NewFolderScreen(Screen[str | None]):
 # --------------------------------------------------------------------------
 
 
-class SyncProgressApp(App[SyncStats | None]):
-    """Progress bar + live log while SyncEngine runs in a worker thread."""
+class ProgressScreen(Screen[SyncStats | None]):
+    """Progress bar + live log while SyncEngine runs in a worker thread.
+
+    Dismisses with the stats once the run finishes.  ``q``/``esc`` only
+    return once the run is over, so a sync can't be abandoned halfway.
+    """
 
     CSS = """
     #log { height: 1fr; border: round $accent; margin: 0 1; padding: 0 1; }
@@ -360,12 +500,17 @@ class SyncProgressApp(App[SyncStats | None]):
     #bar { height: 1; margin: 0 1; }
     """
 
-    BINDINGS = [("q", "quit", "Exit")]
+    BINDINGS = [
+        Binding("q", "back", "Back"),
+        Binding("escape", "back", "Back", show=False),
+    ]
 
-    def __init__(self, engine: SyncEngine):
+    def __init__(self, engine: SyncEngine, force: bool = False):
         super().__init__()
         self.engine = engine
         self.stats: SyncStats | None = None
+        self.finished = False
+        self.force = force
         self._log_lines: list[str] = []
 
     def compose(self) -> ComposeResult:
@@ -376,21 +521,20 @@ class SyncProgressApp(App[SyncStats | None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.title = "nocfo-sync"
-        self.sub_title = "syncing…"
+        self.sub_title = "force sync — re-uploading everything" if self.force else "syncing…"
         self.run_worker(self._run, thread=True)
 
     def _run(self) -> None:
         def progress(phase: str, msg: str) -> None:
-            self.call_from_thread(self._append_log, msg)
+            self.app.call_from_thread(self._append_log, msg)
 
         self.engine.progress = progress
         try:
             stats = self.engine.sync()
         except Exception as e:  # surface crashes in the UI, not just stderr
-            self.call_from_thread(self._crash, str(e))
+            self.app.call_from_thread(self._crash, str(e))
             return
-        self.call_from_thread(self._done, stats)
+        self.app.call_from_thread(self._done, stats)
 
     def _append_log(self, msg: str) -> None:
         self._log_lines.append(msg)
@@ -399,6 +543,7 @@ class SyncProgressApp(App[SyncStats | None]):
 
     def _done(self, stats: SyncStats) -> None:
         self.stats = stats
+        self.finished = True
         self.query_one("#bar", ProgressBar).update(total=100, progress=100)
         s = stats
         summary = (
@@ -412,8 +557,34 @@ class SyncProgressApp(App[SyncStats | None]):
         if s.files_left_behind:
             summary += f", {s.files_left_behind} left in NoCFO (gone from Drive)"
         self.query_one("#summary", Static).update(summary)
-        self.sub_title = "done — press q to exit"
+        self.sub_title = "done — press q to go back"
 
     def _crash(self, msg: str) -> None:
+        self.finished = True
         self.query_one("#summary", Static).update(f"[red]sync crashed: {msg}[/red]")
-        self.sub_title = "crashed — press q to exit"
+        self.sub_title = "crashed — press q to go back"
+
+    def action_back(self) -> None:
+        if not self.finished:
+            self.notify("sync is still running — wait for it to finish", severity="warning")
+            return
+        self.dismiss(self.stats)
+
+
+class SyncProgressApp(App[SyncStats | None]):
+    """Standalone wrapper around :class:`ProgressScreen` (CLI + tests)."""
+
+    def __init__(self, engine: SyncEngine):
+        super().__init__()
+        self._screen = ProgressScreen(engine)
+
+    @property
+    def engine(self) -> SyncEngine:
+        return self._screen.engine
+
+    @property
+    def stats(self) -> SyncStats | None:
+        return self._screen.stats
+
+    def on_mount(self) -> None:
+        self.push_screen(self._screen, self.exit)

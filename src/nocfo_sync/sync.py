@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .nocfo import NoCfoClient, NoCfoError, NocfoFolder
+from .nocfo import NoCfoClient, NoCfoError, NocfoFolder, guess_mime
 from .state import State
 
 # Stubs for Google-native documents: not real file content.
@@ -54,6 +54,7 @@ class SyncEngine:
         root_path: Path,
         destination_folder_id: int | None,
         dry_run: bool = False,
+        force: bool = False,
         progress: ProgressFn | None = None,
     ):
         self.client = client
@@ -61,6 +62,9 @@ class SyncEngine:
         self.root_path = root_path.resolve()
         self.destination_folder_id = destination_folder_id
         self.dry_run = dry_run
+        # force re-uploads every file, ignoring the (size, mtime) fingerprint.
+        # Used to repair files uploaded before the ``type`` field was sent.
+        self.force = force
         self.progress = progress or (lambda phase, msg: None)
         self.stats = SyncStats()
 
@@ -185,7 +189,12 @@ class SyncEngine:
                 continue
 
             known = self.state.get_file(rel)
-            if known and known[2] == st.st_size and known[3] == st.st_mtime_ns:
+            if (
+                not self.force
+                and known
+                and known[2] == st.st_size
+                and known[3] == st.st_mtime_ns
+            ):
                 self.stats.files_skipped_unchanged += 1
                 continue
 
@@ -196,16 +205,26 @@ class SyncEngine:
                 else self.state.get_folder(folder_rel)
             )
 
-            try:
-                self.progress("files", f"uploading {rel}")
-                content = path.read_bytes()
-                if self.dry_run:
+            if self.dry_run:
+                # plan only: don't read content (Drive placeholders would be
+                # downloaded) and don't touch NoCFO or the state DB
+                if known:
+                    self.stats.files_updated += 1
+                else:
                     self.stats.files_uploaded += 1
-                    continue
-                new = self.client.upload_file(path.name, content, folder_id=folder_id)
+                continue
+
+            self.progress("files", f"uploading {rel}")
+            try:
+                content = path.read_bytes()
             except OSError as e:
                 self._error(f"cannot read {rel}: {e}")
                 continue
+            try:
+                new = self.client.upload_file(
+                    path.name, content, folder_id=folder_id,
+                    mime=guess_mime(path.name),
+                )
             except NoCfoError as e:
                 self._error(f"upload failed for {rel}: {e}")
                 continue

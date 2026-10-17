@@ -33,6 +33,10 @@ class Config:
     mount: Path = field(default_factory=lambda: Path(DEFAULT_MOUNT).expanduser())
     root_folder: str = ""  # relative path inside the mount; "" = not selected
     destination_folder_id: int | None = None  # None = NoCFO root
+    # Whether a destination was ever chosen.  Needed because None means both
+    # "not chosen yet" and "the NoCFO root" — without this the setup wizard
+    # would re-run on every launch after choosing the root.
+    destination_chosen: bool = False
 
     path: Path | None = None  # file this config was loaded from
 
@@ -144,6 +148,10 @@ def load_config(explicit: str | Path | None = None) -> Config:
         cfg.root_folder = gdrive.get("root_folder", cfg.root_folder)
         dest = gdrive.get("destination_folder_id")
         cfg.destination_folder_id = int(dest) if dest else None
+        # older configs predate this flag: an explicit id means it was chosen
+        cfg.destination_chosen = bool(
+            gdrive.get("destination_selected", dest is not None)
+        )
         cfg.path = path
     else:
         cfg.mount = cfg.mount.expanduser()
@@ -175,6 +183,7 @@ def save_config(cfg: Config) -> Path:
         f'mount = "{cfg.mount}"\n'
         f'root_folder = "{cfg.root_folder}"\n'
         f"{dest_line}"
+        f"destination_selected = {'true' if cfg.destination_chosen else 'false'}\n"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)

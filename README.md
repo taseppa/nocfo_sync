@@ -22,6 +22,8 @@ Google Drive for Desktop mount          NoCFO
   reusing folders that already exist by name and creating the missing ones.
 - Uploads every file; uploads with a size/mtime fingerprint stored in a
   local SQLite DB so re-runs skip unchanged files.
+- Sends a `type` (MIME) on every upload — see the *Caveats* section, since
+  an empty `type` is what stops NoCFO from treating a file as a file.
 - **Never deletes anything in NoCFO.** Files removed from Drive are only
   reported. Files *changed* in Drive are re-uploaded and the previous NoCFO
   copy is deleted **only if it is not attached to a document**.
@@ -39,7 +41,8 @@ python3 -m venv .venv
 
 ## Configure
 
-Copy the example and fill it in:
+The TUI writes this file for you on first run. To do it by hand, copy the
+example and fill it in:
 
 ```sh
 cp config.example.toml config.toml
@@ -80,16 +83,63 @@ prints exactly which config and state file are in use.
 
 ## Use
 
-```sh
-# pick the Drive source folder and the NoCFO destination interactively
-.venv/bin/nocfo-sync pick-drive-root
-.venv/bin/nocfo-sync pick-destination
+Just run it with no arguments — the TUI is the normal way to use the tool:
 
+```sh
+.venv/bin/nocfo-sync
+```
+
+### The TUI
+
+One screen does everything: it shows the current setup and offers the actions.
+
+| Key | Action |
+|---|---|
+| `s` | Sync (upload new/changed files) |
+| `f` | Force sync — re-upload everything (asks `y`/`n` first) |
+| `g` | Change the Google Drive source folder |
+| `n` | Change the NoCFO destination folder |
+| `t` | Show the NoCFO folder tree (read-only) |
+| `i` | Status / details (config path, state path, …) |
+| `q` | Quit |
+
+Each action is also clickable in the list. Syncing shows a progress bar and a
+live log; when it finishes the panel updates with the counts.
+
+### First run
+
+With nothing configured the TUI walks you through setup automatically:
+
+1. **Token** — paste your NoCFO personal access token (checked immediately).
+2. **Business** — if the config has no `business_slug`, pick from the
+   businesses your token can access.
+3. **Drive source** — browse the Drive mount and choose a folder to sync.
+4. **NoCFO destination** — choose where files land (or the NoCFO root).
+
+Each answer is saved to `config.toml` as you go. Cancelling a step drops you
+on the menu with a note about what is still missing; the `g` / `n` keys take
+you back to the picker, so nothing is a dead end. If the Drive mount can't be
+found (Google Drive for Desktop not running) the picker says so instead of
+showing a broken tree.
+
+### Command line (for cron / scripting)
+
+The subcommands still exist and skip the TUI:
+
+```sh
 # run one pass (opens the pickers if nothing is configured yet)
 .venv/bin/nocfo-sync sync
 
 # non-interactive / scriptable
 .venv/bin/nocfo-sync sync --plain --dry-run --root-destination
+
+# re-upload everything, ignoring the unchanged check (repairs files that
+# were uploaded before the type field was sent)
+.venv/bin/nocfo-sync sync --force
+
+# individual pickers, if you prefer them standalone
+.venv/bin/nocfo-sync pick-drive-root
+.venv/bin/nocfo-sync pick-destination
 
 # inspect
 .venv/bin/nocfo-sync status
@@ -98,7 +148,9 @@ prints exactly which config and state file are in use.
 
 `sync` shows a Textual progress bar and live log. `--plain` prints to stdout
 instead (useful for cron); `--dry-run` computes the plan without touching
-NoCFO or the state DB.
+NoCFO or the state DB or reading any file content; `--force` (default **off**)
+re-uploads every file even when its size/mtime fingerprint says it is
+unchanged.
 
 ### Pickers
 
@@ -148,6 +200,15 @@ loudly rather than silently misplacing files.
 
 ## Caveats
 
+- **The `type` field is what makes a file a file.** `file_upload` has two
+  inputs for MIME: the multipart part's own `Content-Type` and a separate
+  `type` form field. NoCFO **ignores the former** and stores the latter.
+  With `type` empty, the app does not classify the file and the server never
+  generates a preview thumbnail, so uploads look like they "are not files".
+  This tool always sends `type` (guessed from the extension). Files uploaded
+  by an older version have an empty `type` that **cannot be PATCHed**
+  (`type` is read-only), so repair them with `nocfo-sync sync --force`,
+  which re-uploads them with the correct type.
 - **`Idempotency-Key` + `file_upload`**: `api-tst.nocfo.io` returns `500` for
   any upload carrying that header. On such a 500 the client retries once
   without the header and disables idempotency for the rest of that run

@@ -17,6 +17,29 @@ from typing import Any, Iterator
 
 import httpx
 
+# Extensions that ``mimetypes`` does not reliably know (varies by Python
+# build/platform).  These feed NoCFO's ``type`` field, so be explicit.
+_EXTRA_MIME_TYPES = {
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+    ".webp": "image/webp",
+    ".avif": "image/avif",
+}
+
+
+def guess_mime(name: str) -> str:
+    """Best-effort MIME type for a filename.
+
+    NoCFO stores this in the attachment's ``type`` field.  When ``type`` is
+    empty the file is not classified and the server never generates a preview
+    thumbnail, so the file "does not look like a file" in the app (see README).
+    """
+    lower = name.lower()
+    for ext, mime in _EXTRA_MIME_TYPES.items():
+        if lower.endswith(ext):
+            return mime
+    return mimetypes.guess_type(name)[0] or "application/octet-stream"
+
 
 class NoCfoError(Exception):
     def __init__(self, message: str, status_code: int | None = None):
@@ -105,6 +128,23 @@ class NoCfoClient:
         data = self._request("GET", f"/v1/business/{self.business_slug}/")
         return data.get("name", self.business_slug)
 
+    # -- token / business discovery (no slug needed) ---------------------
+
+    def current_user(self) -> dict:
+        """``GET /v1/user/`` — validates the token without a business slug.
+
+        Used by the TUI on first run to check a freshly entered token.
+        """
+        return self._request("GET", "/v1/user/")
+
+    def list_businesses(self) -> list[dict]:
+        """``GET /v1/business/`` — businesses the token can access.
+
+        Also slug-independent, so it both proves the token works and gives
+        the TUI something to offer when no business slug is configured yet.
+        """
+        return list(self._paginate("/v1/business/"))
+
     # -- folders (undocumented!) ----------------------------------------
 
     def list_root_folders(self) -> list[NocfoFolder]:
@@ -151,6 +191,10 @@ class NoCfoClient:
         api-tst.nocfo.io) return 500 for any request carrying that header;
         on such a 500 we transparently retry once without the key and turn
         idempotency off for the rest of the session.
+
+        The ``type`` form field is what NoCFO stores as the attachment type
+        and what gates server-side preview generation; the multipart part's
+        own ``Content-Type`` is ignored by the server.
         """
         if len(name) > 256:
             stem, dot, ext = name.rpartition(".")
@@ -158,8 +202,8 @@ class NoCfoClient:
                 name = name[: 256 - len(ext) - 1] + "." + ext
             else:
                 name = name[:256]
-        mime = mime or mimetypes.guess_type(name)[0] or "application/octet-stream"
-        data: dict[str, str] = {"name": name}
+        mime = mime or guess_mime(name)
+        data: dict[str, str] = {"name": name, "type": mime}
         if folder_id is not None:
             data["folder_id"] = str(folder_id)
         if notes:

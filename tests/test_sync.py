@@ -55,7 +55,7 @@ class FakeClient:
         self._next_file += 1
         self.files[self._next_file] = {
             "id": self._next_file, "name": name,
-            "folder_id": folder_id, "content": content,
+            "folder_id": folder_id, "content": content, "mime": mime,
         }
         return self.files[self._next_file]
 
@@ -188,6 +188,30 @@ def test_dry_run_writes_nothing(tree, tmp_path):
     assert client.files == {}
 
 
+def test_dry_run_does_not_read_file_content(tree, tmp_path, monkeypatch):
+    """--dry-run must not pull Drive placeholder files down just to plan."""
+    def boom(self):
+        raise AssertionError("dry run must not read file bytes")
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+    stats = make_engine(tree, FakeClient(), tmp_path / "s.db", dry_run=True).sync()
+    assert stats.files_uploaded == 3
+
+
+def test_dry_run_with_force_plans_reuploads(tree, tmp_path):
+    client = FakeClient()
+    make_engine(tree, client, tmp_path / "s.db").sync()
+    before = {f["id"]: f["content"] for f in client.files.values()}
+    stats = make_engine(
+        tree, client, tmp_path / "s.db", dry_run=True, force=True
+    ).sync()
+    # planned as replacements, not fresh uploads, and nothing touched
+    assert stats.files_updated == 3
+    assert stats.files_uploaded == 0
+    assert {f["id"]: f["content"] for f in client.files.values()} == before
+    assert client.deleted == []
+
+
 def test_state_persists_folder_mapping(tmp_path):
     state = State(tmp_path / "s.db")
     state.set_folder("a/b", 42)
@@ -197,3 +221,40 @@ def test_state_persists_folder_mapping(tmp_path):
     state.remove_file("a/b/c.txt")
     assert state.get_file("a/b/c.txt") is None
     state.close()
+
+
+def test_uploads_carry_mime_type(tree, tmp_path):
+    """NoCFO only classifies a file when the ``type`` form field is set;
+    a missing type is why uploaded files were not treated as files."""
+    client = FakeClient()
+    make_engine(tree, client, tmp_path / "s.db").sync()
+    mimes = {f["name"]: f["mime"] for f in client.files.values()}
+    assert mimes["a.txt"] == "text/plain"
+    assert mimes["r.txt"] == "text/plain"
+    assert all(v is not None for v in mimes.values())
+
+
+def test_force_reuploads_unchanged_files(tree, tmp_path):
+    client = FakeClient()
+    make_engine(tree, client, tmp_path / "s.db").sync()
+    first_ids = {f["name"]: f["id"] for f in client.files.values()}
+
+    stats = make_engine(tree, client, tmp_path / "s.db", force=True).sync()
+
+    # nothing changed on disk, yet everything is re-uploaded and replaced
+    assert stats.files_updated == 3
+    assert stats.files_skipped_unchanged == 0
+    for old_id in first_ids.values():
+        assert old_id in client.deleted
+    # state now points at the fresh copies
+    second_ids = {f["name"]: f["id"] for f in client.files.values()}
+    assert all(second_ids[n] != old for n, old in first_ids.items())
+
+
+def test_force_off_by_default_still_skips(tree, tmp_path):
+    client = FakeClient()
+    make_engine(tree, client, tmp_path / "s.db").sync()
+    stats = make_engine(tree, client, tmp_path / "s.db").sync()
+    assert stats.files_uploaded == 0
+    assert stats.files_updated == 0
+    assert stats.files_skipped_unchanged == 3

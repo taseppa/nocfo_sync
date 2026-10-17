@@ -1,7 +1,9 @@
 """Command-line interface.
 
-Commands:
-  sync              run one sync pass (opens TUI pickers if not configured)
+Run with no arguments for the unified TUI.  Subcommands remain for
+scripting/cron:
+
+  sync              run one sync pass (plain variant for cron)
   pick-drive-root   TUI: choose the Google Drive folder to sync from
   pick-destination  TUI: choose the NoCFO destination folder
   discover-folders  print the NoCFO folder tree
@@ -50,7 +52,7 @@ def cmd_sync(cfg: Config, args: argparse.Namespace) -> int:
         return 1
     print(f"business: {name} ({cfg.business_slug})")
 
-    if cfg.destination_folder_id is None and not args.root_destination:
+    if not cfg.destination_chosen and not args.root_destination:
         print("No NoCFO destination selected yet — opening picker…")
         picker = NoCfoFolderPicker(client)
         dest = picker.run()
@@ -58,15 +60,18 @@ def cmd_sync(cfg: Config, args: argparse.Namespace) -> int:
             print("cancelled.")
             return 1
         cfg.destination_folder_id = dest
+        cfg.destination_chosen = True
         save_config(cfg)
-        print(f"saved destination folder id: {dest}")
+        label = "NoCFO root" if dest is None else f"folder id {dest}"
+        print(f"saved destination {label}")
 
     root = cfg.root_path
     assert root is not None
 
     state = State(cfg.state_path)
     engine = SyncEngine(
-        client, state, root, cfg.destination_folder_id, dry_run=args.dry_run
+        client, state, root, cfg.destination_folder_id,
+        dry_run=args.dry_run, force=args.force,
     )
     try:
         if args.plain:
@@ -112,6 +117,7 @@ def cmd_pick_destination(cfg: Config, args: argparse.Namespace) -> int:
         print("cancelled.")
         return 1
     cfg.destination_folder_id = picked
+    cfg.destination_chosen = True
     path = save_config(cfg)
     label = "NoCFO root" if picked is None else f"folder id {picked}"
     print(f"saved destination {label} -> {path}")
@@ -144,7 +150,10 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
     print(f"token:         {'set' if cfg.token else 'MISSING'}")
     print(f"drive mount:   {cfg.mount}  {'(exists)' if cfg.mount.is_dir() else '(MISSING)'}")
     print(f"drive root:    {cfg.root_folder or '(not selected)'}")
-    print(f"destination:   {cfg.destination_folder_id or 'NoCFO root'}")
+    if not cfg.destination_chosen:
+        print("destination:   (not selected)")
+    else:
+        print(f"destination:   {cfg.destination_folder_id or 'NoCFO root'}")
     state_path = cfg.state_path
     if state_path.exists():
         state = State(state_path)
@@ -158,12 +167,19 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="nocfo-sync")
+    parser = argparse.ArgumentParser(
+        prog="nocfo-sync",
+        description="Sync a Google Drive folder into NoCFO. "
+                    "Run with no command for the interactive TUI.",
+    )
     parser.add_argument("--config", help="path to config.toml")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=False)
 
     p = sub.add_parser("sync", help="run one sync pass")
     p.add_argument("--dry-run", action="store_true", help="don't upload anything")
+    p.add_argument("--force", action="store_true",
+                   help="re-upload every file, ignoring the unchanged check "
+                        "(repairs files uploaded without a type)")
     p.add_argument("--plain", action="store_true", help="no TUI; log to stdout")
     p.add_argument("--root-destination", action="store_true",
                    help="sync into the NoCFO root without asking")
@@ -189,6 +205,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {e}", file=sys.stderr)
         return 1
     try:
+        if not args.command:
+            from .app import run_tui
+
+            run_tui(cfg)
+            return 0
         return args.fn(cfg, args)
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
