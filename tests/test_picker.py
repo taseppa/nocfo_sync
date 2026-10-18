@@ -191,3 +191,51 @@ async def test_nocfo_picker_new_folder_via_screen():
         await pilot.press("enter")
         await pilot.pause()
         assert ("2026", 1) in client.created
+
+
+@pytest.mark.asyncio
+async def test_cancelling_new_folder_dialog_does_not_crash():
+    from nocfo_sync.picker import NewFolderScreen
+
+    client = FakeClient()
+    app = NoCfoFolderPicker(client)  # type: ignore[arg-type]
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("n")
+        await pilot.pause()
+        assert isinstance(app.screen, NewFolderScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert client.created == []
+        assert not isinstance(app.screen, NewFolderScreen)
+
+
+@pytest.mark.asyncio
+async def test_nocfo_picker_preselects_current_destination():
+    client = FakeClient()
+    client.folders[2] = {"id": 2, "name": "2026", "parent": 1}
+    client.folders[3] = {"id": 3, "name": "Q1", "parent": 2}
+    app = NoCfoFolderPicker(client, preselect=3)  # type: ignore[arg-type]
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        assert app.tree.cursor_node is not None
+        assert app.tree.cursor_node.data == 3
+
+
+@pytest.mark.asyncio
+async def test_bracketed_names_are_shown_literally(tmp_path: Path):
+    (tmp_path / "[receipts] old").mkdir()
+    (tmp_path / "[b]bold").mkdir()
+    client = FakeClient()
+    client.folders[1]["name"] = "[archive] 2025 [/x]"  # a closing tag used to crash
+    drive = DriveFolderPicker(tmp_path)
+    async with drive.run_test() as pilot:
+        await pilot.pause()
+        labels = {c.label.plain for c in drive.tree.root.children}
+        assert labels == {"[receipts] old", "[b]bold"}
+    nocfo = NoCfoFolderPicker(client)  # type: ignore[arg-type]
+    async with nocfo.run_test() as pilot:
+        await pilot.pause()
+        label = nocfo.tree.root.children[0].label.plain
+        assert label.startswith("[archive] 2025 [/x]")

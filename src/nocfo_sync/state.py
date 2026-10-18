@@ -7,6 +7,7 @@ Tables
 ------
 folders: drive_relpath -> nocfo folder id
 files:   drive_relpath -> nocfo file id + fingerprint (size, mtime_ns)
+meta:    key -> value (e.g. the NoCFO destination the ids above live under)
 """
 
 from __future__ import annotations
@@ -28,6 +29,10 @@ CREATE TABLE IF NOT EXISTS files (
     mtime_ns       INTEGER NOT NULL,
     updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -39,6 +44,31 @@ class State:
         self.db = sqlite3.connect(path, check_same_thread=False)
         self._lock = threading.Lock()
         self.db.executescript(SCHEMA)
+
+    # -- meta ------------------------------------------------------------
+
+    def get_meta(self, key: str) -> str | None:
+        with self._lock:
+            row = self.db.execute(
+                "SELECT value FROM meta WHERE key = ?", (key,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock:
+            self.db.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            self.db.commit()
+
+    def reset_tracking(self) -> None:
+        """Forget every folder and file mapping (the next sync starts fresh)."""
+        with self._lock:
+            self.db.execute("DELETE FROM folders")
+            self.db.execute("DELETE FROM files")
+            self.db.commit()
 
     # -- folders ---------------------------------------------------------
 
@@ -107,4 +137,5 @@ class State:
             self.db.commit()
 
     def close(self) -> None:
-        self.db.close()
+        with self._lock:
+            self.db.close()

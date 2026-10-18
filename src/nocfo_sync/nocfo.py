@@ -13,7 +13,7 @@ import mimetypes
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any, BinaryIO, Iterator
 
 import httpx
 
@@ -57,6 +57,21 @@ class NocfoFolder:
     has_content: bool | None = None
 
 
+# Network errors raised before the request reached the server: always safe
+# to retry, even for a POST that is not idempotent.
+_NOT_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+_MAX_RETRY_AFTER = 60.0
+
+
+def _retry_after(resp: httpx.Response) -> float | None:
+    """Seconds from a ``Retry-After: <seconds>`` header, capped."""
+    try:
+        value = float(resp.headers.get("Retry-After", ""))
+    except ValueError:
+        return None
+    return min(max(value, 0.0), _MAX_RETRY_AFTER)
+
+
 class NoCfoClient:
     RETRY_STATUSES = {429, 500, 502, 503, 504}
 
@@ -79,25 +94,38 @@ class NoCfoClient:
 
     # -- low level -------------------------------------------------------
 
-    def _request(self, method: str, path: str, retry_5xx: bool = True, **kwargs) -> Any:
+    def _request(self, method: str, path: str, retry_5xx: bool = True,
+                 idempotent: bool = True, **kwargs) -> Any:
+        """Send a request, retrying transient failures.
+
+        ``idempotent=False`` marks a request that must not be repeated once
+        the server may have acted on it (a POST without an Idempotency-Key):
+        it is then retried only when it provably never left this machine.
+        """
         retry_statuses = set(self.RETRY_STATUSES)
         if not retry_5xx:
             retry_statuses -= {500, 502, 503, 504}
         delay = 1.0
         last: Exception | None = None
         for attempt in range(self.max_retries + 1):
+            for f in (kwargs.get("files") or {}).values():
+                # a streamed upload is consumed by each attempt; rewind it
+                if hasattr(f[1], "seek"):
+                    f[1].seek(0)
             try:
                 resp = self._http.request(method, path, **kwargs)
             except httpx.HTTPError as e:
                 last = e
-                if attempt == self.max_retries:
+                retryable = idempotent or isinstance(e, _NOT_SENT_ERRORS)
+                if attempt == self.max_retries or not retryable:
                     raise NoCfoError(f"{method} {path}: network error: {e}") from e
                 time.sleep(delay)
                 delay = min(delay * 2, 30)
                 continue
             if resp.status_code >= 400:
                 if resp.status_code in retry_statuses and attempt < self.max_retries:
-                    time.sleep(delay)
+                    wait = _retry_after(resp) if resp.status_code == 429 else None
+                    time.sleep(delay if wait is None else wait)
                     delay = min(delay * 2, 30)
                     continue
                 raise NoCfoError(
@@ -165,8 +193,11 @@ class NoCfoClient:
         body: dict[str, Any] = {"name": name}
         if parent is not None:
             body["parent"] = parent
+        # not idempotent: a repeated POST could create a duplicate folder.
+        # A failure is harmless — the next sync adopts the folder by name.
         r = self._request(
-            "POST", f"/v1/business/{self.business_slug}/folders/", json=body
+            "POST", f"/v1/business/{self.business_slug}/folders/", json=body,
+            retry_5xx=False, idempotent=False,
         )
         return NocfoFolder(id=r["id"], name=r["name"], parent=r.get("parent"))
 
@@ -179,12 +210,13 @@ class NoCfoClient:
     def upload_file(
         self,
         name: str,
-        content: bytes,
+        content: bytes | BinaryIO,
         folder_id: int | None = None,
         mime: str | None = None,
         notes: str | None = None,
     ) -> dict:
-        """Upload via multipart.
+        """Upload via multipart.  ``content`` may be bytes or a binary file
+        object, which is streamed instead of being read into memory.
 
         Sends ``Idempotency-Key`` when enabled so network retries cannot
         create duplicates.  Some NoCFO environments (observed on
@@ -225,7 +257,10 @@ class NoCfoClient:
                     "NoCFO returned 500 for file_upload with Idempotency-Key; "
                     "retrying without it and disabling idempotency for this run."
                 )
-        return self._request("POST", path, data=data, files=files)
+        # without a key a repeat could store the file twice: no blind retries
+        return self._request(
+            "POST", path, data=data, files=files, retry_5xx=False, idempotent=False
+        )
 
     def list_files(self, folder: int | None = None, root: bool | None = None,
                    is_used: bool | None = None, search: str | None = None) -> Iterator[dict]:

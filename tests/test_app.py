@@ -90,6 +90,8 @@ class FakeClient:
 
     # files (enough for the sync engine)
     def upload_file(self, name, content, folder_id=None, mime=None, notes=None):
+        if hasattr(content, "read"):  # the engine streams an open file
+            content = content.read()
         self._next_file += 1
         self.files[self._next_file] = {
             "id": self._next_file, "name": name, "folder_id": folder_id,
@@ -545,3 +547,69 @@ def test_destination_label_handles_root_and_missing_name(tmp_path):
     assert make_mapping(
         tmp_path, destination_chosen=False
     ).destination_label == "(not selected)"
+
+
+# -- review fixes ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bracketed_names_render_in_rows(tmp_path):
+    (tmp_path / "[old] kuitit").mkdir()
+    cfg = make_cfg(
+        tmp_path,
+        mappings=[
+            make_mapping(
+                tmp_path,
+                root_folder="[old] kuitit",
+                destination_folder_id=1,
+                destination_folder_name="a [/b] c",
+            )
+        ],
+    )
+    app = NocfoSyncApp(cfg, client_factory=lambda slug: FakeClient())
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        from textual.content import Content
+
+        rendered = Content.from_markup(_rows(app)[0]).plain  # used to raise
+        assert "[old] kuitit" in rendered
+        assert "a [/b] c" in rendered
+
+
+@pytest.mark.asyncio
+async def test_add_mapping_failure_keeps_app_open(tmp_path):
+    class NoBusinesses(FakeClient):
+        def list_businesses(self):
+            raise NoCfoError("temporarily unavailable", 503)
+
+    cfg = make_cfg(tmp_path, root_folder="kuitit")
+    (tmp_path / "kuitit").mkdir()
+    app = NocfoSyncApp(cfg, client_factory=lambda slug: NoBusinesses())
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        await pilot.press("a")
+        await _land_on_list(pilot, app)
+        assert app.return_value is None
+        assert isinstance(app.screen, MappingsScreen)
+        assert len(cfg.mappings) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_reports_unreachable_nocfo_without_starting(tmp_path):
+    (tmp_path / "kuitit").mkdir()
+    cfg = make_cfg(tmp_path, root_folder="kuitit")
+    clients = []
+
+    def factory(slug):
+        clients.append(FakeClient(fail_auth=bool(slug)))
+        return clients[-1]
+
+    app = NocfoSyncApp(cfg, client_factory=factory)
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        await pilot.press("s")
+        for _ in range(20):
+            await pilot.pause(0.05)
+        assert isinstance(app.screen, MappingsScreen)
+        assert not app._starting_sync
+        assert all(c.closed for c in clients if c.fail_auth)

@@ -52,6 +52,8 @@ class FakeClient:
         return NocfoFolder(id=self._next_folder, name=name, parent=parent)
 
     def upload_file(self, name, content, folder_id=None, mime=None, notes=None):
+        if hasattr(content, "read"):  # the engine streams an open file
+            content = content.read()
         self._next_file += 1
         self.files[self._next_file] = {
             "id": self._next_file, "name": name, "folder_id": folder_id,
@@ -175,3 +177,39 @@ def test_mappings_subcommand(tmp_path, capsys):
     cfg = _cfg(tmp_path, ["Receipts"])
     assert cli.cmd_mappings(cfg, Namespace()) == 0
     assert "Receipts" in capsys.readouterr().out
+
+
+def test_one_broken_mapping_does_not_stop_the_others(tmp_path, monkeypatch, capsys):
+    cfg = _cfg(tmp_path, ["Receipts", "Invoices"])
+    cfg.mappings[0].business_slug = ""  # misconfigured
+    made = []
+
+    def factory(cfg, mapping):
+        if not mapping.business_slug:
+            raise ConfigError("no business configured")
+        made.append(FakeClient())
+        return made[-1]
+
+    monkeypatch.setattr(cli, "_client", factory)
+    code = cli.cmd_sync(cfg, _sync_args())
+    assert code == 1
+    assert len(made) == 1 and made[0].files  # Invoices still synced
+    assert "[Receipts] error" in capsys.readouterr().err
+
+
+def test_ambiguous_mapping_selector_errors(tmp_path):
+    cfg = _cfg(tmp_path, ["x/2025", "y/2025"])
+    with pytest.raises(ConfigError, match="several"):
+        cli._select_mapping(cfg, _sync_args(mapping="2025"))
+
+
+def test_discover_folders_depth_counts_levels(tmp_path, monkeypatch, capsys):
+    client = FakeClient()
+    parent = None
+    for name in ("L1", "L2", "L3", "L4"):
+        parent = client.create_folder(name, parent).id
+    monkeypatch.setattr(cli, "_client", lambda cfg, mapping: client)
+    cfg = _cfg(tmp_path, ["Receipts"])
+    cli.cmd_discover_folders(cfg, Namespace(mapping=None, depth=2))
+    out = capsys.readouterr().out
+    assert "L1" in out and "L2" in out and "L3" not in out
