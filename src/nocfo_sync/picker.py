@@ -16,6 +16,7 @@ from typing import Callable
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.markup import escape
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, Label, ProgressBar, Static, Tree
 from textual.widgets._tree import TreeNode
@@ -119,10 +120,12 @@ class DrivePickerScreen(Screen[Path | None]):
         if not self.mount_path.is_dir():
             yield Static(
                 "[red]Drive mount not found[/red] at "
-                f"{self.mount_path}\n"
+                f"{escape(str(self.mount_path))}\n"
                 "Is Google Drive for Desktop installed, running and synced?"
             )
-        yield Static(f"Select a Google Drive folder  [dim]({self.mount_path})[/dim]")
+        yield Static(
+            f"Select a Google Drive folder  [dim]({escape(str(self.mount_path))})[/dim]"
+        )
         tree: FolderTree[Path] = FolderTree("My Drive", data=self.mount_path)
         tree.on_choose = self.action_select
         tree.root.expand()
@@ -148,7 +151,7 @@ class DrivePickerScreen(Screen[Path | None]):
                 if entry.is_symlink():
                     continue
                 if entry.is_dir(follow_symlinks=False):
-                    child = node.add(entry.name, data=Path(entry.path))
+                    child = node.add(escape(entry.name), data=Path(entry.path))
                     _add_placeholder(child)
             except OSError:
                 continue
@@ -335,12 +338,12 @@ class NoCfoPickerScreen(Screen[NocfoChoice]):
         try:
             folders = self.client.list_root_folders()
         except NoCfoError as e:
-            node.add(f"[red]error: {e}[/red]")
+            node.add(f"[red]error: {escape(str(e))}[/red]")
             node.allow_expand = False
             return
         for f in folders:
             self._names[f.id] = f.name
-            child = node.add(f"{f.name}  [dim]({f.id})[/dim]", data=f.id)
+            child = node.add(f"{escape(f.name)}  [dim]({f.id})[/dim]", data=f.id)
             _add_placeholder(child)
         node.allow_expand = bool(node.children)
 
@@ -349,12 +352,14 @@ class NoCfoPickerScreen(Screen[NocfoChoice]):
         try:
             detail = self.client.get_folder(node.data)
         except NoCfoError as e:
-            node.add(f"[red]error: {e}[/red]")
+            node.add(f"[red]error: {escape(str(e))}[/red]")
             node.allow_expand = False
             return
         for c in detail.children or []:
             self._names[c["id"]] = c["name"]
-            child = node.add(f"{c['name']}  [dim]({c['id']})[/dim]", data=c["id"])
+            child = node.add(
+                f"{escape(c['name'])}  [dim]({c['id']})[/dim]", data=c["id"]
+            )
             _add_placeholder(child)
         node.allow_expand = bool(node.children)
 
@@ -369,6 +374,38 @@ class NoCfoPickerScreen(Screen[NocfoChoice]):
             return
         if _is_placeholder(node):
             self._populate_children(node)
+
+    def on_mount(self) -> None:
+        if self.preselect is not None:
+            self._expand_to(self.preselect)
+        self.tree.focus()
+
+    def _expand_to(self, folder_id: int) -> None:
+        """Open the tree down to ``folder_id`` and put the cursor on it.
+
+        The API has no path lookup, so walk up the ``parent`` links first.
+        Best effort: on any API error the tree just stays at the root."""
+        chain: list[int] = []
+        current: int | None = folder_id
+        try:
+            while current is not None and len(chain) < 64:
+                chain.append(current)
+                current = self.client.get_folder(current).parent
+        except NoCfoError:
+            return
+        node = self.tree.root
+        for fid in reversed(chain):
+            match = next((c for c in node.children if c.data == fid), None)
+            if match is None:
+                return
+            if fid != folder_id:  # open the ancestors, not the target itself
+                if _is_placeholder(match):
+                    self._populate_children(match)
+                match.expand()
+            node = match
+        # node._line is only valid after layout (see DrivePickerScreen)
+        self.call_after_refresh(self.tree.select_node, node)
+        self.call_after_refresh(self.tree.scroll_to_node, node)
 
     def refresh_node(self, node: TreeNode[int | None]) -> None:
         """Re-read a node's children (used after creating a folder)."""
@@ -400,19 +437,19 @@ class NoCfoPickerScreen(Screen[NocfoChoice]):
             return
         self._new_folder_parent = node
 
-        def handle(name: str) -> None:
-            name = name.strip()
+        def handle(name: str | None) -> None:
+            name = (name or "").strip()  # None = the dialog was cancelled
             parent = self._new_folder_parent
             if not name or parent is None:
                 return
             try:
                 created = self.client.create_folder(name, parent.data)
             except NoCfoError as e:
-                self.notify(f"create failed: {e}", severity="error")
+                self.notify(f"create failed: {e}", severity="error", markup=False)
                 return
             self.refresh_node(parent)
             parent.expand()
-            self.notify(f"created folder {name!r} ({created.id})")
+            self.notify(f"created folder {name!r} ({created.id})", markup=False)
 
         self.app.push_screen(NewFolderScreen(), handle)
 
@@ -577,7 +614,7 @@ class ProgressScreen(Screen[SyncStats | None]):
         self.app.call_from_thread(self._done, stats)
 
     def _append_log(self, msg: str) -> None:
-        self._log_lines.append(msg)
+        self._log_lines.append(escape(msg))  # file names are not markup
         del self._log_lines[:-200]
         self.query_one("#log", Static).update("\n".join(self._log_lines))
 
@@ -590,7 +627,9 @@ class ProgressScreen(Screen[SyncStats | None]):
 
     def _crash(self, msg: str) -> None:
         self.finished = True
-        self.query_one("#summary", Static).update(f"[red]sync crashed: {msg}[/red]")
+        self.query_one("#summary", Static).update(
+            f"[red]sync crashed: {escape(msg)}[/red]"
+        )
         self.sub_title = "crashed — press q to go back"
 
     def action_back(self) -> None:
@@ -684,7 +723,7 @@ class SyncAllProgressScreen(Screen[SyncStats | None]):
         self.app.call_from_thread(self._done, total)
 
     def _append_log(self, msg: str) -> None:
-        self._log_lines.append(msg)
+        self._log_lines.append(escape(msg))  # labels and file names are not markup
         del self._log_lines[:-300]
         self.query_one("#log", Static).update("\n".join(self._log_lines))
 

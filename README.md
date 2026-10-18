@@ -67,6 +67,7 @@ root_folder = "Receipts"             # relative to mount
 destination_folder_id = 1234         # omit for the NoCFO root
 destination_folder_name = "Receipts 2026"   # label the TUI shows (optional)
 destination_selected = true
+state_file = "receipts"              # .state/<state_file>.db (assigned automatically)
 
 [[mapping]]                          # a second mapping, same or other business
 business_slug = "acme"
@@ -77,8 +78,10 @@ destination_selected = true
 
 Each mapping is identified by its `root_folder`, so there is nothing to name.
 The token may also live in a plain `config` file (`token=…`) or in the
-`NOCFO_TOKEN` environment variable. `config.toml` and `config` are
-git-ignored.
+`NOCFO_TOKEN` environment variable. Those two are **overrides**: they are used
+for the run but never written into `config.toml` when the app saves it.
+`config.toml` is written atomically and readable only by you (`0600`).
+`config.toml` and `config` are git-ignored.
 
 ### Where the config is found
 
@@ -93,8 +96,10 @@ git-ignored.
 
 A plain `config` file in the same locations is merged in as a fallback. The
 sync database is stored **next to the config file**, one file per mapping
-(`.state/<drive-source>.db`), so runs from different directories share the
-same state. `nocfo-sync status` prints exactly which config and state files
+(`.state/<state_file>.db`, named after the Drive source when the mapping is
+created), so runs from different directories share the same state. The name
+is saved with the mapping, so adding, removing or reordering mappings never
+moves another mapping onto a different database. `nocfo-sync status` prints exactly which config and state files
 are in use.
 
 ## Use
@@ -180,7 +185,8 @@ The subcommands still exist and skip the TUI:
 `sync` with no `--mapping` runs **every** mapping (handy for cron); one
 failing mapping doesn't stop the others. `--mapping` selects a single one by
 its Drive source folder — the relative path, the folder name, or a
-case-insensitive substring. It shows a Textual progress bar and live log;
+case-insensitive substring; a selector that matches several mappings is an
+error rather than a guess. It shows a Textual progress bar and live log;
 `--plain` prints to stdout instead (useful for cron). `--dry-run` computes the
 plan without touching NoCFO or the state DB or reading any file content;
 `--force` (default **off**) re-uploads every file even when its size/mtime
@@ -256,6 +262,14 @@ loudly rather than silently misplacing files.
 - **Placeholder files**: in streamed mode Drive for Desktop only stores a
   stub until you open a file. The sync reads every file, so a first run over
   a large folder downloads everything locally.
+- **Changing a mapping's destination** starts its tracking over: the next
+  sync mirrors the whole tree into the new destination. Nothing already in
+  the old destination is moved or deleted. Changing the Drive source gives
+  the mapping a fresh state database for the same reason.
+- **Uploads without an `Idempotency-Key`** (idempotency off, or after the
+  api-tst fallback) are retried only when the request never reached the
+  server, so a timeout can't store a file twice; the next sync uploads
+  whatever failed. Folder creation is never retried blindly either.
 - **Change detection** uses size + mtime, the only signals the mount exposes.
   Editing metadata without changing size/mtime will be missed.
 - Native Google Docs are skipped rather than exported.

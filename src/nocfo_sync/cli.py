@@ -75,7 +75,7 @@ def _sync_one(cfg: Config, mapping: Mapping, args: argparse.Namespace) -> int:
         if picked is None:
             print("cancelled.")
             return 1
-        mapping.root_folder = picked.relative_to(mapping.mount.resolve()).as_posix()
+        mapping.set_root_folder(picked.relative_to(mapping.mount.resolve()).as_posix())
         save_config(cfg)
         print(f"saved Drive root: {mapping.root_folder}")
 
@@ -160,7 +160,12 @@ def cmd_sync(cfg: Config, args: argparse.Namespace) -> int:
 
     code = 0
     for mapping in mappings:
-        code |= _sync_one(cfg, mapping, args)
+        # one broken mapping must not stop the others from syncing
+        try:
+            code |= _sync_one(cfg, mapping, args)
+        except (ConfigError, NoCfoError) as e:
+            print(f"[{mapping.label}] error: {e}", file=sys.stderr)
+            code = 1
     return code
 
 
@@ -183,7 +188,7 @@ def cmd_pick_drive_root(cfg: Config, args: argparse.Namespace) -> int:
     if picked is None:
         print("cancelled.")
         return 1
-    mapping.root_folder = picked.relative_to(mapping.mount.resolve()).as_posix()
+    mapping.set_root_folder(picked.relative_to(mapping.mount.resolve()).as_posix())
     path = save_config(cfg)
     print(f"saved Drive root {mapping.root_folder!r} -> {path}")
     return 0
@@ -222,7 +227,7 @@ def cmd_discover_folders(cfg: Config, args: argparse.Namespace) -> int:
             children = client.get_folder(folder_id).children or []
         for c in children:
             print("  " * indent + f"- {c['name']}  (id {c['id']})")
-            if args.depth > indent:
+            if indent + 1 < args.depth:
                 show(c["id"], indent + 1)
 
     try:
@@ -304,7 +309,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("discover-folders", help="print the NoCFO folder tree")
     p.add_argument("--mapping", help="which mapping (default: the only one)")
-    p.add_argument("--depth", type=int, default=3)
+    p.add_argument("--depth", type=int, default=3,
+                   help="number of folder levels to print (default: 3)")
     p.set_defaults(fn=cmd_discover_folders)
 
     p = sub.add_parser("status", help="show config + per-mapping summary")

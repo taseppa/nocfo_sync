@@ -50,6 +50,8 @@ class FakeClient:
 
     # files
     def upload_file(self, name, content, folder_id=None, mime=None, notes=None):
+        if hasattr(content, "read"):  # the engine streams an open file
+            content = content.read()
         if self.fail_uploads:
             raise NoCfoError("boom", 500)
         self._next_file += 1
@@ -70,6 +72,9 @@ class FakeClient:
     def delete_file(self, file_id):
         self.deleted.append(file_id)
         self.files.pop(file_id, None)
+
+    def folders_by_name(self, name):
+        return next(f["id"] for f in self.folders.values() if f["name"] == name)
 
 
 @pytest.fixture()
@@ -258,3 +263,111 @@ def test_force_off_by_default_still_skips(tree, tmp_path):
     assert stats.files_uploaded == 0
     assert stats.files_updated == 0
     assert stats.files_skipped_unchanged == 3
+
+
+# -- destination changes ---------------------------------------------------------
+
+
+def _engine_to(tree, client, state_path, dest, **kw):
+    return SyncEngine(client, State(state_path), tree, dest,
+                      progress=lambda p, m: None, **kw)
+
+
+def test_changed_destination_mirrors_into_the_new_one(tree, tmp_path):
+    client = FakeClient()
+    old = client.create_folder("Old", None).id
+    new = client.create_folder("New", None).id
+    _engine_to(tree, client, tmp_path / "s.db", old).sync()
+
+    stats = _engine_to(tree, client, tmp_path / "s.db", new).sync()
+    assert stats.files_uploaded == 3  # nothing counted as "unchanged"
+
+    def under(folder_id, target):
+        while folder_id is not None:
+            if folder_id == target:
+                return True
+            folder_id = client.folders[folder_id]["parent"]
+        return False
+
+    latest = sorted(client.files.values(), key=lambda f: f["id"])[-3:]
+    assert all(under(f["folder_id"], new) for f in latest)
+    assert client.deleted == []  # the old copies are left alone
+
+
+def test_dry_run_with_changed_destination_plans_full_sync(tree, tmp_path):
+    client = FakeClient()
+    old = client.create_folder("Old", None).id
+    new = client.create_folder("New", None).id
+    _engine_to(tree, client, tmp_path / "s.db", old).sync()
+    stats = _engine_to(tree, client, tmp_path / "s.db", new, dry_run=True).sync()
+    assert stats.files_uploaded == 3
+    assert stats.files_skipped_unchanged == 0
+    # the real tracking is untouched by the dry run
+    assert _engine_to(tree, client, tmp_path / "s.db", old).sync().files_skipped_unchanged == 3
+
+
+# -- folder failures ---------------------------------------------------------------
+
+
+def test_folder_failure_skips_its_contents_and_continues(tree, tmp_path):
+    client = FakeClient()
+    real_create = client.create_folder
+
+    def create(name, parent):
+        if name == "Receipts":
+            raise NoCfoError("server error", 500)
+        return real_create(name, parent)
+
+    client.create_folder = create
+    stats = make_engine(tree, client, tmp_path / "s.db").sync()
+    assert any("Receipts" in e for e in stats.errors)
+    names = {f["name"] for f in client.files.values()}
+    assert names == {"a.txt", "b.txt"}  # Invoices still synced
+    assert all(f["folder_id"] is not None for f in client.files.values())
+    assert "r.txt" not in names  # not dumped into the NoCFO root
+
+
+def test_dry_run_nested_new_folder_does_not_adopt_root_namesake(tree, tmp_path):
+    client = FakeClient()
+    client.create_folder("2026", None)  # a root folder named like a subfolder
+    stats = make_engine(tree, client, tmp_path / "s.db", dry_run=True).sync()
+    assert stats.folders_created == 3  # Invoices, Receipts, Receipts/2026
+    assert stats.folders_reused == 0
+
+
+def test_unreadable_folder_is_not_reported_as_gone(tree, tmp_path):
+    client = FakeClient()
+    make_engine(tree, client, tmp_path / "s.db").sync()
+    locked = tree / "Receipts" / "2026"
+    locked.chmod(0)
+    try:
+        stats = make_engine(tree, client, tmp_path / "s.db").sync()
+    finally:
+        locked.chmod(0o755)
+    assert any("cannot list" in e for e in stats.errors)
+    assert stats.files_left_behind == 0
+    assert stats.files_failed == 0
+
+
+def test_cached_folders_validated_once_per_parent(tree, tmp_path):
+    client = FakeClient()
+    make_engine(tree, client, tmp_path / "s.db").sync()
+    calls = []
+    real_get = client.get_folder
+    client.get_folder = lambda fid: (calls.append(fid), real_get(fid))[1]
+    stats = make_engine(tree, client, tmp_path / "s.db").sync()
+    assert stats.folders_reused == 3
+    # root children come from list_root_folders; only Receipts has a cached
+    # subfolder, so one fetch — not one per cached folder
+    assert calls == [client.folders_by_name("Receipts")]
+
+
+def test_upload_streams_file_instead_of_reading_it(tree, tmp_path, monkeypatch):
+    def boom(self):
+        raise AssertionError("must not read whole files into memory")
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+    client = FakeClient()
+    stats = make_engine(tree, client, tmp_path / "s.db").sync()
+    assert stats.files_uploaded == 3
+    assert {f["content"] for f in client.files.values()} == {b"a", b"b", b"r"}

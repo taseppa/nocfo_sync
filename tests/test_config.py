@@ -242,3 +242,145 @@ def test_search_dirs_includes_repo_root():
     assert repo_root in config_mod._search_dirs()
     # repo root is discoverable even when the cwd is somewhere else
     assert config_mod._search_dirs()[0] == Path.cwd()
+
+
+# -- token handling (overrides never persisted) ------------------------------
+
+
+def test_env_token_is_not_written_into_config(isolated_dirs, monkeypatch):
+    work, _ = isolated_dirs
+    path = work / "config.toml"
+    path.write_text('[nocfo]\ntoken = "file-token"\n')
+    monkeypatch.setenv("NOCFO_TOKEN", "env-secret")
+    cfg = load_config()
+    assert cfg.token == "env-secret"
+    save_config(cfg)
+    text = path.read_text()
+    assert "env-secret" not in text
+    assert 'token = "file-token"' in text
+
+
+def test_token_entered_in_app_replaces_env_override(isolated_dirs, monkeypatch):
+    work, _ = isolated_dirs
+    (work / "config.toml").write_text('[nocfo]\ntoken = "old"\n')
+    monkeypatch.setenv("NOCFO_TOKEN", "env-secret")
+    cfg = load_config()
+    cfg.token = "typed-in"  # what the TUI's token screen does
+    save_config(cfg)
+    assert 'token = "typed-in"' in (work / "config.toml").read_text()
+
+
+def test_legacy_token_is_not_copied_into_config(isolated_dirs):
+    work, _ = isolated_dirs
+    (work / "config").write_text("token=legacytoken\n")
+    cfg = load_config()
+    save_config(cfg)
+    assert "legacytoken" not in (work / "config.toml").read_text()
+    # still picked up from the legacy file next time
+    assert load_config().token == "legacytoken"
+
+
+def test_empty_token_in_file_does_not_hide_legacy_token(isolated_dirs):
+    work, _ = isolated_dirs
+    (work / "config").write_text("token=legacytoken\n")
+    (work / "config.toml").write_text('[nocfo]\ntoken = ""\n')
+    assert load_config().token == "legacytoken"
+
+
+def test_saved_config_is_private_and_written_atomically(isolated_dirs):
+    work, _ = isolated_dirs
+    path = work / "config.toml"
+    path.write_text('[nocfo]\ntoken = "t"\n')
+    path.chmod(0o644)
+    save_config(load_config())
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert [p.name for p in work.iterdir()] == ["config.toml"]  # no temp left
+
+
+def test_control_characters_round_trip(isolated_dirs, tmp_path):
+    cfg = Config()
+    cfg.path = tmp_path / "config.toml"
+    cfg.token = 'a"b\\c\nd\te\x01'
+    save_config(cfg)
+    assert load_config(cfg.path).token == cfg.token
+
+
+# -- stable per-mapping state DBs ----------------------------------------------
+
+
+def test_identical_mappings_get_separate_state_dbs(tmp_path):
+    cfg = Config()
+    cfg.path = tmp_path / "config.toml"
+    cfg.mappings = [Mapping(root_folder="A/Kuitit"), Mapping(root_folder="A/Kuitit")]
+    paths = {cfg.state_path_for(m) for m in cfg.mappings}
+    assert len(paths) == 2
+
+
+def test_state_db_survives_removing_another_mapping(isolated_dirs, tmp_path):
+    cfg = Config()
+    cfg.path = tmp_path / "config.toml"
+    cfg.mappings = [Mapping(root_folder="Foo/Bar"), Mapping(root_folder="foo-bar")]
+    before = cfg.state_path_for(cfg.mappings[1])
+    save_config(cfg)
+    again = load_config(cfg.path)
+    again.mappings.pop(0)
+    save_config(again)
+    assert load_config(cfg.path).state_path_for(again.mappings[0]) == before
+
+
+def test_new_mapping_does_not_take_an_existing_db(tmp_path):
+    cfg = Config()
+    cfg.path = tmp_path / "config.toml"
+    cfg.mappings = [Mapping(root_folder="Receipts")]
+    first = cfg.state_path_for(cfg.mappings[0])
+    cfg.mappings.insert(0, Mapping(root_folder="Receipts"))
+    assert cfg.state_path_for(cfg.mappings[1]) == first
+    assert cfg.state_path_for(cfg.mappings[0]) != first
+
+
+def test_changing_drive_source_gets_a_new_db(tmp_path):
+    cfg = Config()
+    cfg.path = tmp_path / "config.toml"
+    m = Mapping(root_folder="Receipts")
+    cfg.mappings = [m]
+    old = cfg.state_path_for(m)
+    m.set_root_folder("Invoices")
+    assert cfg.state_path_for(m) == tmp_path / ".state" / "invoices.db" != old
+    m.set_root_folder("Invoices")  # same source again: keeps it
+    assert cfg.state_path_for(m) == tmp_path / ".state" / "invoices.db"
+
+
+# -- --mapping selection ---------------------------------------------------------
+
+
+def test_find_mapping_rejects_ambiguous_selector():
+    cfg = Config()
+    cfg.mappings = [
+        Mapping(root_folder="Receipts 2025"),
+        Mapping(root_folder="Receipts 2026"),
+        Mapping(root_folder="x/2025"),
+        Mapping(root_folder="y/2025"),
+    ]
+    with pytest.raises(ConfigError, match="several"):
+        cfg.find_mapping("receipts")
+    with pytest.raises(ConfigError, match="several"):
+        cfg.find_mapping("2025")
+    assert cfg.find_mapping("x/2025") is cfg.mappings[2]
+    assert cfg.find_mapping("Receipts 2026") is cfg.mappings[1]
+
+
+def test_root_path_rejects_sibling_with_same_prefix(tmp_path):
+    mount = tmp_path / "My Drive"
+    (tmp_path / "My Drive2").mkdir(parents=True)
+    mount.mkdir()
+    m = Mapping(mount=mount, root_folder="../My Drive2")
+    with pytest.raises(ConfigError):
+        _ = m.root_path
+
+
+def test_default_mount_finds_signed_in_account(isolated_dirs):
+    _, home = isolated_dirs
+    drive = home / "Library" / "CloudStorage" / "GoogleDrive-me@example.com" / "My Drive"
+    drive.mkdir(parents=True)
+    assert config_mod.default_mount() == drive
+    assert Mapping().mount == drive

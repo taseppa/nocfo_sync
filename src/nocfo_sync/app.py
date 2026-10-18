@@ -27,6 +27,7 @@ from pathlib import Path
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.markup import escape
 from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, Label, OptionList, Static
@@ -106,7 +107,8 @@ class BusinessPickerScreen(Screen[str | None]):
             yield Label("Select the business for this mapping")
             options = [
                 Option(
-                    f"{b.get('name', '?')}  [dim]({b.get('slug', '?')})[/dim]",
+                    f"{escape(str(b.get('name', '?')))}  "
+                    f"[dim]({escape(str(b.get('slug', '?')))})[/dim]",
                     id=str(b.get("slug")),
                 )
                 for b in self.businesses
@@ -147,7 +149,7 @@ class AuthScreen(Screen[bool]):
     def compose(self) -> ComposeResult:
         with Vertical(id="box"):
             yield Label("[red]NoCFO refused the request[/red]")
-            yield Label(self.message)
+            yield Label(self.message, markup=False)
             yield Label(
                 "Press [b]r[/b] to enter a different token, [b]q[/b] to quit.",
                 id="hint",
@@ -182,9 +184,9 @@ class ConfirmScreen(Screen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="box"):
-            yield Label(f"[b]{self.title_text}[/b]")
+            yield Label(f"[b]{escape(self.title_text)}[/b]")
             if self.detail:
-                yield Label(self.detail)
+                yield Label(self.detail, markup=False)
             yield Label("[b]y[/b] yes     [b]n[/b] no", id="hint")
         yield Footer()
 
@@ -348,6 +350,7 @@ class NocfoSyncApp(App[None]):
         self.user_email: str | None = None
         self._api_error: str | None = None
         self._resolving_names = False
+        self._starting_sync = False  # a sync's NoCFO check is in flight
 
     # -- helpers ---------------------------------------------------------
 
@@ -358,20 +361,21 @@ class NocfoSyncApp(App[None]):
         try:
             return mapping.root_path
         except ConfigError as e:
-            self.notify(str(e), severity="error")
+            self.notify(str(e), severity="error", markup=False)
             return None
 
     def _row_label(self, mapping: Mapping, width: int) -> str:
         """One list row: ``<drive source>  →  <business> · <NoCFO folder>``."""
         plain = mapping.root_folder or "(no Drive source)"
         pad = " " * max(1, width - len(plain) + 2)
-        drive = plain if mapping.root_folder else f"[red]{plain}[/red]"
+        drive = escape(plain) if mapping.root_folder else f"[red]{plain}[/red]"
         dest = (
-            mapping.destination_label
+            escape(mapping.destination_label)
             if mapping.destination_chosen
             else "[red](no destination)[/red]"
         )
-        return f"{drive}{pad}[dim]→[/dim] {mapping.business_slug or '?'} › {dest}"
+        business = escape(mapping.business_slug or "?")
+        return f"{drive}{pad}[dim]→[/dim] {business} › {dest}"
 
     def _mapping_options(self) -> list[Option]:
         labels = [m.root_folder or "(no Drive source)" for m in self.cfg.mappings]
@@ -382,9 +386,9 @@ class NocfoSyncApp(App[None]):
         ]
 
     def _mappings_status(self) -> str:
-        header = f"[b]NoCFO[/b]  {self.cfg.base_url}"
+        header = f"[b]NoCFO[/b]  {escape(self.cfg.base_url)}"
         if self.user_email:
-            header += f"  [dim]({self.user_email})[/dim]"
+            header += f"  [dim]({escape(self.user_email)})[/dim]"
         count = len(self.cfg.mappings)
         lines = [header, "No mappings yet." if count == 0 else f"[b]{count}[/b] mapping(s)"]
         if self.last_stats:
@@ -395,7 +399,9 @@ class NocfoSyncApp(App[None]):
                 f"{len(s.errors)} errors[/dim]"
             )
         if self._api_error:
-            lines.append(f"[yellow]NoCFO unreachable: {self._api_error}[/yellow]")
+            lines.append(
+                f"[yellow]NoCFO unreachable: {escape(self._api_error)}[/yellow]"
+            )
         incomplete = [
             m for m in self.cfg.mappings
             if not m.root_folder or not m.destination_chosen
@@ -410,9 +416,9 @@ class NocfoSyncApp(App[None]):
     def _info_text(self) -> str:
         cfg = self.cfg
         rows = [
-            f"config:      {cfg.path or '(none — using defaults)'}",
-            f"base_url:    {cfg.base_url}",
-            f"user:        {self.user_email or '(unknown)'}",
+            f"config:      {escape(str(cfg.path or '(none — using defaults)'))}",
+            f"base_url:    {escape(cfg.base_url)}",
+            f"user:        {escape(self.user_email or '(unknown)')}",
             f"token:       {'set' if cfg.token else 'MISSING'}",
         ]
         if not cfg.mappings:
@@ -421,11 +427,12 @@ class NocfoSyncApp(App[None]):
         rows.append("")
         for m in cfg.mappings:
             rows += [
-                f"[b]{m.label}[/b]",
-                f"  drive:       {m.root_folder or '(not selected)'}   ({m.mount})",
-                f"  business:    {m.business_slug or '(unset)'}",
-                f"  destination: {m.destination_label}",
-                f"  state:       {cfg.state_path_for(m)}",
+                f"[b]{escape(m.label)}[/b]",
+                f"  drive:       {escape(m.root_folder or '(not selected)')}"
+                f"   ({escape(str(m.mount))})",
+                f"  business:    {escape(m.business_slug or '(unset)')}",
+                f"  destination: {escape(m.destination_label)}",
+                f"  state:       {escape(str(cfg.state_path_for(m)))}",
             ]
         return "\n".join(rows)
 
@@ -490,7 +497,7 @@ class NocfoSyncApp(App[None]):
 
     def _fatal(self, msg: str) -> None:
         self.push_screen(
-            InfoScreen(f"[red]{msg}[/red]\n\nPress q to quit."),
+            InfoScreen(f"[red]{escape(msg)}[/red]\n\nPress q to quit."),
             lambda _r: self.exit(),
         )
 
@@ -608,7 +615,7 @@ class NocfoSyncApp(App[None]):
     def _do_remove(self, mapping: Mapping) -> None:
         self.cfg.mappings.remove(mapping)
         save_config(self.cfg)
-        self.notify(f"removed mapping {mapping.label}")
+        self.notify(f"removed mapping {mapping.label}", markup=False)
         if not self.cfg.mappings:
             self.exit()
             return
@@ -616,16 +623,16 @@ class NocfoSyncApp(App[None]):
 
     # -- syncing ---------------------------------------------------------
 
-    def _prepare_sync(
-        self, mapping: Mapping, force: bool, quiet: bool = False
-    ) -> tuple[NoCfoClient, State, SyncEngine] | None:
-        """Validate a mapping and build its client/state/engine, or None."""
+    def _local_root(self, mapping: Mapping, quiet: bool = False) -> Path | None:
+        """The checks that need no network: a Drive source and a NoCFO
+        destination are chosen.  Returns the Drive root, or None."""
         root = self._root_path(mapping)
         if root is None or not root.is_dir():
             if not quiet:
                 self.notify(
                     f"{mapping.label}: choose a Google Drive source first (g)",
                     severity="warning",
+                    markup=False,
                 )
             return None
         if not mapping.destination_chosen:
@@ -633,29 +640,57 @@ class NocfoSyncApp(App[None]):
                 self.notify(
                     f"{mapping.label}: choose a NoCFO destination first (n)",
                     severity="warning",
+                    markup=False,
                 )
             return None
+        return root
+
+    def _connect(
+        self, mapping: Mapping, root: Path, state_path: Path, force: bool
+    ) -> tuple[NoCfoClient, State, SyncEngine] | str:
+        """Worker thread: check NoCFO access, then build the client, state
+        and engine.  Returns an error message if NoCFO can't be reached."""
         client = self._client(mapping.business_slug)
         try:
             client.check()
         except NoCfoError as e:
             client.close()
-            if not quiet:
-                self.notify(
-                    f"{mapping.label}: cannot reach NoCFO: {e}", severity="error"
-                )
-            return None
-        state = State(self.cfg.state_path_for(mapping))
+            return f"{mapping.label}: cannot reach NoCFO: {e}"
+        state = State(state_path)
         engine = SyncEngine(
             client, state, root, mapping.destination_folder_id, force=force
         )
         return client, state, engine
 
+    def _begin_connecting(self) -> bool:
+        """Claim the 'starting a sync' slot (the NoCFO check runs in a
+        worker, so a second key press could otherwise start a second run)."""
+        if self._starting_sync:
+            self.notify("a sync is already starting", severity="warning")
+            return False
+        self._starting_sync = True
+        return True
+
     def _start_sync(self, mapping: Mapping, force: bool) -> None:
-        prepared = self._prepare_sync(mapping, force)
-        if prepared is None:
+        root = self._local_root(mapping)
+        if root is None or not self._begin_connecting():
             return
-        client, state, engine = prepared
+        state_path = self.cfg.state_path_for(mapping)
+
+        def work() -> None:
+            result = self._connect(mapping, root, state_path, force)
+            self.call_from_thread(self._launch_sync, result, force)
+
+        self.run_worker(work, thread=True, name="prepare-sync")
+
+    def _launch_sync(
+        self, result: tuple[NoCfoClient, State, SyncEngine] | str, force: bool
+    ) -> None:
+        self._starting_sync = False
+        if isinstance(result, str):
+            self.notify(result, severity="error", markup=False)
+            return
+        client, state, engine = result
         self.push_screen(
             ProgressScreen(engine, force=force),
             lambda stats: self._sync_done(stats, client, state),
@@ -667,7 +702,7 @@ class NocfoSyncApp(App[None]):
         self.last_stats = stats
         if stats is not None and stats.errors:
             for err in stats.errors[:5]:
-                self.notify(err, severity="error", timeout=8)
+                self.notify(err, severity="error", timeout=8, markup=False)
         try:
             client.close()
         finally:
@@ -675,30 +710,62 @@ class NocfoSyncApp(App[None]):
         self._refresh_mappings()
 
     def _start_sync_all(self, force: bool) -> None:
-        jobs: list[tuple[str, SyncEngine]] = []
-        resources: list[tuple[NoCfoClient, State]] = []
+        ready: list[tuple[Mapping, Path, Path]] = []
         skipped: list[str] = []
         for mapping in self.cfg.mappings:
-            prepared = self._prepare_sync(mapping, force, quiet=True)
-            if prepared is None:
+            root = self._local_root(mapping, quiet=True)
+            if root is None:
                 skipped.append(mapping.label)
+            else:
+                ready.append((mapping, root, self.cfg.state_path_for(mapping)))
+        if not ready:
+            self._nothing_to_sync()
+            return
+        if not self._begin_connecting():
+            return
+
+        def work() -> None:
+            results = [
+                (m.label, self._connect(m, root, state_path, force))
+                for m, root, state_path in ready
+            ]
+            self.call_from_thread(self._launch_sync_all, results, skipped, force)
+
+        self.run_worker(work, thread=True, name="prepare-sync-all")
+
+    def _nothing_to_sync(self) -> None:
+        self.notify(
+            "nothing to sync — check each mapping's Drive source and destination",
+            severity="warning",
+            timeout=8,
+        )
+
+    def _launch_sync_all(
+        self,
+        results: list[tuple[str, tuple[NoCfoClient, State, SyncEngine] | str]],
+        skipped: list[str],
+        force: bool,
+    ) -> None:
+        self._starting_sync = False
+        jobs: list[tuple[str, SyncEngine]] = []
+        resources: list[tuple[NoCfoClient, State]] = []
+        for label, result in results:
+            if isinstance(result, str):
+                skipped.append(label)
                 continue
-            client, state, engine = prepared
-            jobs.append((mapping.label, engine))
+            client, state, engine = result
+            jobs.append((label, engine))
             resources.append((client, state))
         if not jobs:
-            for client, state in resources:
-                client.close()
-                state.close()
-            self.notify(
-                "nothing to sync — check each mapping's Drive source and "
-                "destination",
-                severity="warning",
-                timeout=8,
-            )
+            self._nothing_to_sync()
             return
         if skipped:
-            self.notify("skipped: " + ", ".join(skipped), severity="warning", timeout=8)
+            self.notify(
+                "skipped: " + ", ".join(skipped),
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
         self.push_screen(
             SyncAllProgressScreen(jobs, force=force),
             lambda stats: self._sync_all_done(stats, resources),
@@ -710,7 +777,7 @@ class NocfoSyncApp(App[None]):
         self.last_stats = stats
         if stats is not None and stats.errors:
             for err in stats.errors[:8]:
-                self.notify(err, severity="error", timeout=8)
+                self.notify(err, severity="error", timeout=8, markup=False)
         for client, state in resources:
             try:
                 client.close()
@@ -729,9 +796,9 @@ class NocfoSyncApp(App[None]):
     def _on_change_drive(self, mapping: Mapping, picked: Path | None) -> None:
         if picked is None:
             return
-        mapping.root_folder = picked.relative_to(mapping.mount.resolve()).as_posix()
+        mapping.set_root_folder(picked.relative_to(mapping.mount.resolve()).as_posix())
         save_config(self.cfg)
-        self.notify(f"Drive source: {mapping.root_folder}")
+        self.notify(f"Drive source: {mapping.root_folder}", markup=False)
         self._refresh_mappings()
 
     def _change_dest(self, mapping: Mapping) -> None:
@@ -751,7 +818,7 @@ class NocfoSyncApp(App[None]):
             mapping.destination_folder_name = choice.folder_name
             mapping.destination_chosen = True
             save_config(self.cfg)
-            self.notify(f"destination → {mapping.destination_label}")
+            self.notify(f"destination → {mapping.destination_label}", markup=False)
         finally:
             client.close()
         self._refresh_mappings()
@@ -774,11 +841,19 @@ class NocfoSyncApp(App[None]):
         try:
             businesses = client.list_businesses()
         except NoCfoError as e:
-            self.call_from_thread(self._fatal, f"could not list businesses: {e}")
+            self.call_from_thread(self._businesses_failed, str(e))
             return
         finally:
             client.close()
         self.call_from_thread(self._pick_business, businesses)
+
+    def _businesses_failed(self, msg: str) -> None:
+        if not self.cfg.mappings:
+            self._fatal(f"could not list businesses: {msg}")
+            return
+        # adding to an existing list: report it and go back, don't quit
+        self.notify(f"could not list businesses: {msg}", severity="error", markup=False)
+        self._cancel_add()
 
     def _pick_business(self, businesses: list[dict]) -> None:
         if not businesses:
@@ -821,7 +896,7 @@ class NocfoSyncApp(App[None]):
             self._new_mapping.destination_chosen = True
             self.cfg.mappings.append(self._new_mapping)
             save_config(self.cfg)
-            self.notify(f"added mapping: {self._new_mapping.label}")
+            self.notify(f"added mapping: {self._new_mapping.label}", markup=False)
             self._new_mapping = None
         finally:
             client.close()

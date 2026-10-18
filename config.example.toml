@@ -16,7 +16,8 @@ idempotency = true
 # The TUI adds these for you; they are shown here for hand-editing.
 [[mapping]]
 business_slug = "your-business-slug"
-# Google Drive for Desktop mount point.
+# Google Drive for Desktop mount point.  If omitted, the first signed-in
+# account under ~/Library/CloudStorage/GoogleDrive-*/My Drive is used.
 mount = "~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive"
 # Folder to sync, relative to the mount.
 root_folder = "Receipts"
@@ -29,3 +30,6 @@ root_folder = "Receipts"
 # Whether a destination was chosen at all.  Distinguishes "not chosen yet"
 # (false) from "chose the NoCFO root" (true with no destination_folder_id).
 destination_selected = true
+# Name of this mapping's sync database (.state/<state_file>.db).  Assigned
+# automatically the first time the config is saved; keep it stable.
+# state_file = "receipts"
