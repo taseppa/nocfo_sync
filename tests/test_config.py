@@ -384,3 +384,24 @@ def test_default_mount_finds_signed_in_account(isolated_dirs):
     drive.mkdir(parents=True)
     assert config_mod.default_mount() == drive
     assert Mapping().mount == drive
+
+
+def test_last_drive_folder_round_trip(tmp_path):
+    cfg = Config()
+    cfg.path = tmp_path / "config.toml"
+    assert cfg.last_drive_folder() is None
+    cfg.remember_drive_folder(tmp_path / "a")
+    assert cfg.last_drive_folder() == tmp_path / "a"
+    cfg.remember_drive_folder(tmp_path / "b")
+    assert cfg.last_drive_folder() == tmp_path / "b"
+
+
+def test_drive_preselect_prefers_mapping_source(tmp_path):
+    cfg = Config()
+    cfg.path = tmp_path / "config.toml"
+    (tmp_path / "kuitit").mkdir()
+    cfg.remember_drive_folder(tmp_path / "laskut")
+    m = Mapping(mount=tmp_path)
+    assert cfg.drive_preselect(m) == tmp_path / "laskut"  # no source yet
+    m.root_folder = "kuitit"
+    assert cfg.drive_preselect(m) == (tmp_path / "kuitit").resolve()

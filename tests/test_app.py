@@ -613,3 +613,32 @@ async def test_sync_reports_unreachable_nocfo_without_starting(tmp_path):
         assert isinstance(app.screen, MappingsScreen)
         assert not app._starting_sync
         assert all(c.closed for c in clients if c.fail_auth)
+
+
+@pytest.mark.asyncio
+async def test_wizard_reopens_drive_picker_at_last_choice(tmp_path):
+    drive = tmp_path / "drive"
+    for name in ("kuitit", "laskut"):
+        (drive / name).mkdir(parents=True)
+    laskut = (drive / "laskut").resolve()
+    app = make_app(tmp_path, mount=drive)
+    async with app.run_test() as pilot:
+        await _land_on_list(pilot, app)
+        app._add_mapping()  # reuses the existing mapping's mount
+        await _settle(pilot, DrivePickerScreen)
+        assert app.screen.preselect is None  # nothing remembered yet
+        await pilot.press("down", "down")  # My Drive -> kuitit -> laskut
+        await pilot.press("enter")
+        await _settle(pilot, NoCfoPickerScreen)
+        await pilot.press("enter")
+        await _settle(pilot, MappingsScreen)
+        assert app.cfg.mappings[1].root_folder == "laskut"
+
+        app._add_mapping()
+        await _settle(pilot, DrivePickerScreen)
+        await pilot.pause()
+        assert app.screen.preselect == laskut
+        assert app.screen.tree.cursor_node.data == laskut
+        await pilot.press("enter")
+        await _settle(pilot, NoCfoPickerScreen)
+        assert app.screen.preselect is None  # NoCFO still starts at the root

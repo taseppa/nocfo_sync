@@ -789,7 +789,7 @@ class NocfoSyncApp(App[None]):
 
     def _change_drive(self, mapping: Mapping) -> None:
         self.push_screen(
-            DrivePickerScreen(mapping.mount, self._root_path(mapping)),
+            DrivePickerScreen(mapping.mount, self.cfg.drive_preselect(mapping)),
             lambda picked: self._on_change_drive(mapping, picked),
         )
 
@@ -798,6 +798,7 @@ class NocfoSyncApp(App[None]):
             return
         mapping.set_root_folder(picked.relative_to(mapping.mount.resolve()).as_posix())
         save_config(self.cfg)
+        self.cfg.remember_drive_folder(picked)
         self.notify(f"Drive source: {mapping.root_folder}", markup=False)
         self._refresh_mappings()
 
@@ -870,13 +871,17 @@ class NocfoSyncApp(App[None]):
             return
         self._new_mapping.business_slug = slug
         self.push_screen(
-            DrivePickerScreen(self._new_mapping.mount, None), self._on_new_drive
+            DrivePickerScreen(
+                self._new_mapping.mount, self.cfg.drive_preselect(self._new_mapping)
+            ),
+            self._on_new_drive,
         )
 
     def _on_new_drive(self, picked: Path | None) -> None:
         if picked is None or self._new_mapping is None:
             self._cancel_add()
             return
+        self.cfg.remember_drive_folder(picked)
         self._new_mapping.root_folder = picked.relative_to(
             self._new_mapping.mount.resolve()
         ).as_posix()

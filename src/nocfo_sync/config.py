@@ -123,6 +123,38 @@ class Config:
         base = self.path.parent if self.path else Path.cwd()
         return base / ".state"
 
+    @property
+    def _last_drive_folder_path(self) -> Path:
+        return self.state_dir / "last_drive_folder"
+
+    def last_drive_folder(self) -> Path | None:
+        """The Drive folder last chosen in the picker, so the picker can
+        reopen there.  None when nothing is remembered."""
+        try:
+            text = self._last_drive_folder_path.read_text().strip()
+        except OSError:
+            return None
+        return Path(text) if text else None
+
+    def remember_drive_folder(self, folder: Path) -> None:
+        """Record the picker's choice; best effort, a failure is not fatal."""
+        path = self._last_drive_folder_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{folder}\n")
+        except OSError:
+            pass
+
+    def drive_preselect(self, mapping: Mapping) -> Path | None:
+        """Where the Drive picker should open for ``mapping``: its own source
+        folder once it has one, else the last folder picked."""
+        if mapping.root_folder:
+            try:
+                return mapping.root_path
+            except ConfigError:
+                pass
+        return self.last_drive_folder()
+
     def _legacy_state_key(self, mapping: Mapping) -> str:
         """The DB stem older versions derived from the list position, used
         once to adopt an existing DB for a mapping without ``state_file``."""

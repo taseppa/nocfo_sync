@@ -71,12 +71,13 @@ def _sync_one(cfg: Config, mapping: Mapping, args: argparse.Namespace) -> int:
             )
             return 1
         print("No Drive folder selected yet — opening picker…")
-        picked = DriveFolderPicker(mapping.mount).run()
+        picked = DriveFolderPicker(mapping.mount, cfg.drive_preselect(mapping)).run()
         if picked is None:
             print("cancelled.")
             return 1
         mapping.set_root_folder(picked.relative_to(mapping.mount.resolve()).as_posix())
         save_config(cfg)
+        cfg.remember_drive_folder(picked)
         print(f"saved Drive root: {mapping.root_folder}")
 
     client = _client(cfg, mapping)
@@ -183,13 +184,13 @@ def cmd_mappings(cfg: Config, args: argparse.Namespace) -> int:
 
 def cmd_pick_drive_root(cfg: Config, args: argparse.Namespace) -> int:
     mapping = _select_mapping(cfg, args)
-    preselect = mapping.root_path if mapping.root_folder else None
-    picked = DriveFolderPicker(mapping.mount, preselect).run()
+    picked = DriveFolderPicker(mapping.mount, cfg.drive_preselect(mapping)).run()
     if picked is None:
         print("cancelled.")
         return 1
     mapping.set_root_folder(picked.relative_to(mapping.mount.resolve()).as_posix())
     path = save_config(cfg)
+    cfg.remember_drive_folder(picked)
     print(f"saved Drive root {mapping.root_folder!r} -> {path}")
     return 0
 
